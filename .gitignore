@@ -34,3 +34,14 @@ node_modules/
 
 # Logs
 *.log
+
+# Member 4 - local TTS model files
+agent-service/app/models/*.onnx
+agent-service/app/models/*.bin
+
+# Member 4 - generated TTS audio
+agent-service/audio/
+agent-service/*.wav
+
+# Member 4 - local TTS test request
+agent-service/kannada_request.json
