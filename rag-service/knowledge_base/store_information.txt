@@ -1,0 +1,63 @@
+RetailMate Demo Store Information
+=================================
+
+Store Name: RetailMate Demo Store
+Location: Bangalore, Karnataka, India
+Address: 123 MG Road, Bangalore - 560001
+
+Store Hours:
+  Monday to Saturday: 10:00 AM - 9:00 PM
+  Sunday: 11:00 AM - 8:00 PM
+  Public Holidays: 11:00 AM - 6:00 PM
+
+Store Layout:
+  Aisle A: Clothing & Accessories
+    - Shelf 1: T-Shirts & Casual Wear
+    - Shelf 2: Jeans & Trousers
+    - Shelf 3: Formal Wear
+    - Shelf 4: Ethnic Wear
+    - Shelf 5: Accessories (Belts, Wallets, Sunglasses)
+
+  Aisle B: Footwear
+    - Shelf 1: Formal Shoes
+    - Shelf 2: Casual Shoes
+    - Shelf 3: Running Shoes
+    - Shelf 4: Sports Shoes
+    - Shelf 5: Sneakers
+
+  Aisle C: Electronics
+    - Shelf 1: Headphones & Earbuds
+    - Shelf 2: Speakers & Audio
+    - Shelf 3: Smartwatches & Wearables
+    - Shelf 4: Chargers & Accessories
+
+  Aisle D: Home & Kitchen
+    - Shelf 1: Large Appliances
+    - Shelf 2: Small Appliances
+    - Shelf 3: Kitchenware
+    - Shelf 4: Home Decor
+
+Customer Service:
+  In-store help desk available near the entrance.
+  Customer support hotline: 1800-123-4567 (toll-free)
+  Email: support@retailmate.demo
+
+Return & Exchange:
+  Returns and exchanges can be initiated at the customer service desk.
+  Please carry your order confirmation and the original product packaging.
+  For detailed return policies, refer to the Order Cancellation and Return Policy document.
+
+Payment Methods Accepted:
+  - Cash
+  - Credit/Debit Cards (Visa, MasterCard, RuPay)
+  - UPI (Google Pay, PhonePe, Paytm)
+  - Net Banking
+  - EMI options available on select products
+
+Special Services:
+  - Free Wi-Fi for customers
+  - Wheelchair accessible
+  - Kids play area
+  - Personal shopping assistance available on request
+  - Gift wrapping service
+  - Alteration services for clothing

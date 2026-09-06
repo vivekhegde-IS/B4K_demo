@@ -1,0 +1,172 @@
+[
+  {
+    "product_id": "P001",
+    "name": "Nike Air Max 270",
+    "brand": "Nike",
+    "category": "Footwear",
+    "subcategory": "Sports Shoes",
+    "color": "Black",
+    "size": "9",
+    "price": 4999,
+    "description": "Lightweight sports shoes with Air Max cushioning for all-day comfort",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "B",
+      "shelf": "4"
+    }
+  },
+  {
+    "product_id": "P002",
+    "name": "Levi's 501 Original Jeans",
+    "brand": "Levi's",
+    "category": "Clothing",
+    "subcategory": "Jeans",
+    "color": "Blue",
+    "size": "32",
+    "price": 2499,
+    "description": "Classic straight-fit jeans with button fly and iconic styling",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "A",
+      "shelf": "2"
+    }
+  },
+  {
+    "product_id": "P003",
+    "name": "Samsung Galaxy Buds Pro",
+    "brand": "Samsung",
+    "category": "Electronics",
+    "subcategory": "Headphones",
+    "color": "White",
+    "size": "One Size",
+    "price": 7999,
+    "description": "True wireless earbuds with active noise cancellation and 360 Audio",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "C",
+      "shelf": "1"
+    }
+  },
+  {
+    "product_id": "P004",
+    "name": "Adidas Ultraboost 22",
+    "brand": "Adidas",
+    "category": "Footwear",
+    "subcategory": "Running Shoes",
+    "color": "White",
+    "size": "10",
+    "price": 8999,
+    "description": "Premium running shoes with Boost midsole technology",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "B",
+      "shelf": "3"
+    }
+  },
+  {
+    "product_id": "P005",
+    "name": "U.S. Polo T-Shirt",
+    "brand": "U.S. Polo",
+    "category": "Clothing",
+    "subcategory": "T-Shirt",
+    "color": "Red",
+    "size": "L",
+    "price": 999,
+    "description": "Classic polo neck t-shirt in cotton blend fabric",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "A",
+      "shelf": "1"
+    }
+  },
+  {
+    "product_id": "P006",
+    "name": "Prestige Induction Cooktop",
+    "brand": "Prestige",
+    "category": "Home Appliances",
+    "subcategory": "Small Appliances",
+    "color": "Black",
+    "size": "Standard",
+    "price": 2199,
+    "description": "1600W induction cooktop with auto-off and anti-magnetic wall",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "D",
+      "shelf": "2"
+    }
+  },
+  {
+    "product_id": "P007",
+    "name": "Puma RS-X Sneakers",
+    "brand": "Puma",
+    "category": "Footwear",
+    "subcategory": "Sneakers",
+    "color": "Grey",
+    "size": "8",
+    "price": 3999,
+    "description": "Retro-inspired chunky sneakers with RS cushioning",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "B",
+      "shelf": "5"
+    }
+  },
+  {
+    "product_id": "P008",
+    "name": "Woodland Leather Belt",
+    "brand": "Woodland",
+    "category": "Accessories",
+    "subcategory": "Belt",
+    "color": "Brown",
+    "size": "Free Size",
+    "price": 899,
+    "description": "Genuine leather belt with antique brass buckle",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "A",
+      "shelf": "5"
+    }
+  },
+  {
+    "product_id": "P009",
+    "name": "JBL Flip 6 Speaker",
+    "brand": "JBL",
+    "category": "Electronics",
+    "subcategory": "Speakers",
+    "color": "Blue",
+    "size": "Portable",
+    "price": 9999,
+    "description": "Portable Bluetooth speaker with powerful bass and IP67 waterproof rating",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "C",
+      "shelf": "2"
+    }
+  },
+  {
+    "product_id": "P010",
+    "name": "Allen Solly Formal Shirt",
+    "brand": "Allen Solly",
+    "category": "Clothing",
+    "subcategory": "Formal Shirt",
+    "color": "White",
+    "size": "M",
+    "price": 1499,
+    "description": "Premium cotton formal shirt with a slim fit and wrinkle-free finish",
+    "image_url": "",
+    "location": {
+      "store": "RetailMate Demo Store",
+      "aisle": "A",
+      "shelf": "3"
+    }
+  }
+]
