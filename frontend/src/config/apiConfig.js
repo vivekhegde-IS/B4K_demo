@@ -35,11 +35,15 @@ export function setCurrency(curr) {
   localStorage.setItem(CURRENCY_KEY, curr);
 }
 
-export function formatPrice(amountInUSD, targetCurrency = getCurrency()) {
+export function formatPrice(amount, targetCurrency = getCurrency()) {
+  let numeric = typeof amount === 'number' ? amount : parseFloat(amount) || 0;
   if (targetCurrency === 'INR') {
-    const amountInINR = Math.round(amountInUSD * USD_TO_INR_RATE);
+    // If amount is small (< 500), assume it's USD and convert to INR. If > 500, it's already INR.
+    const amountInINR = numeric < 500 ? Math.round(numeric * USD_TO_INR_RATE) : Math.round(numeric);
     return `₹${amountInINR.toLocaleString('en-IN')}`;
   }
+  // USD display
+  const amountInUSD = numeric > 500 ? numeric / USD_TO_INR_RATE : numeric;
   return `$${amountInUSD.toFixed(2)}`;
 }
 
