@@ -9,6 +9,7 @@ class ProductOut(BaseModel):
     category: str
     price: float
     description: str | None = None
+    image_url: str | None = None
 
     model_config = {"from_attributes": True}
 

@@ -1,8 +1,27 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { MapPin, CheckCircle2, AlertTriangle, XCircle, Tag, ArrowRight } from 'lucide-react';
 import { formatPrice } from '../config/apiConfig';
 import { t } from '../services/i18n';
 
+// Specific high-res images by Product ID
+const PRODUCT_IMAGES = {
+  P001: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&auto=format&fit=crop&q=80", // Red Nike Air Max
+  P002: "https://images.unsplash.com/photo-1584735935682-2f2b69dff9d2?w=600&auto=format&fit=crop&q=80", // White Adidas Ultraboost
+  P003: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?w=600&auto=format&fit=crop&q=80", // Puma Sneaker
+  P004: "https://images.unsplash.com/photo-1541099649105-f69ad21f3246?w=600&auto=format&fit=crop&q=80", // Levi's Jeans
+  P005: "https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=600&auto=format&fit=crop&q=80", // Nike Dri-FIT T-Shirt
+  P006: "https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=600&auto=format&fit=crop&q=80", // Formal Shirt
+  P007: "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=600&auto=format&fit=crop&q=80", // Galaxy Buds
+  P008: "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=600&auto=format&fit=crop&q=80", // Headphones
+  P009: "https://images.unsplash.com/photo-1508685096489-7aacd43bd3b1?w=600&auto=format&fit=crop&q=80", // Smartwatch
+  P010: "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=600&auto=format&fit=crop&q=80", // Leather Watch
+  P011: "https://images.unsplash.com/photo-1511499767150-a48a237f0083?w=600&auto=format&fit=crop&q=80", // Sunglasses
+  P012: "https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=600&auto=format&fit=crop&q=80", // Backpack
+  P013: "https://images.unsplash.com/photo-1507473885765-e6ed057f782c?w=600&auto=format&fit=crop&q=80", // Lamp
+  P014: "https://images.unsplash.com/photo-1585670149967-b4f4da88cc9f?w=600&auto=format&fit=crop&q=80", // Kettle
+};
+
+// Category level fallback images
 const CATEGORY_IMAGES = {
   shoes: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&auto=format&fit=crop&q=80",
   footwear: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&auto=format&fit=crop&q=80",
@@ -13,7 +32,12 @@ const CATEGORY_IMAGES = {
   home: "https://images.unsplash.com/photo-1507473885765-e6ed057f782c?w=600&auto=format&fit=crop&q=80",
 };
 
+// Guaranteed SVG Data URL fallback
+const FALLBACK_SVG = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='600' height='400' viewBox='0 0 600 400'><rect width='100%' height='100%' fill='%230f172a'/><path d='M200 250 C240 210, 360 210, 400 250 L420 280 L180 280 Z' fill='%230284c7' opacity='0.8'/><circle cx='300' cy='180' r='45' fill='%2338bdf8'/><text x='50%' y='85%' font-size='20' font-weight='bold' fill='%2394a3b8' text-anchor='middle' font-family='sans-serif'>In-Store Product</text></svg>";
+
 export default function ProductCard({ product, onLocateAisle, onAskAboutProduct, currentLang }) {
+  const [imgSrc, setImgSrc] = useState(null);
+
   if (!product) return null;
 
   // Stock resolution
@@ -27,14 +51,17 @@ export default function ProductCard({ product, onLocateAisle, onAskAboutProduct,
     ? product.in_stock 
     : stockCount > 0;
 
-  // Image resolution
+  // Primary Image Resolution
+  const pId = (product.product_id || product.id || '').toUpperCase();
   const catKey = (product.category || '').toLowerCase();
-  const defaultImg = CATEGORY_IMAGES[catKey] || "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&auto=format&fit=crop&q=80";
-  const imageUrl = (product.image && product.image.trim()) 
+  
+  const initialImage = (product.image && product.image.trim()) 
     ? product.image 
     : (product.image_url && product.image_url.trim()) 
     ? product.image_url 
-    : defaultImg;
+    : PRODUCT_IMAGES[pId] || CATEGORY_IMAGES[catKey] || CATEGORY_IMAGES.shoes;
+
+  const currentImage = imgSrc || initialImage;
 
   // Location resolution
   let aisleText = product.aisle;
@@ -84,9 +111,14 @@ export default function ProductCard({ product, onLocateAisle, onAskAboutProduct,
         {/* Product Image & Badges */}
         <div className="relative h-44 w-full bg-slate-950 overflow-hidden">
           <img
-            src={imageUrl}
+            src={currentImage}
             alt={product.name}
-            onError={(e) => { e.target.src = defaultImg; }}
+            referrerPolicy="no-referrer"
+            onError={() => {
+              if (currentImage !== FALLBACK_SVG) {
+                setImgSrc(FALLBACK_SVG);
+              }
+            }}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 opacity-90 group-hover:opacity-100"
           />
           <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-transparent to-transparent opacity-80" />
