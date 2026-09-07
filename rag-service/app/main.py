@@ -21,7 +21,11 @@ from app.models.schemas import (
     QueryResponse,
 )
 from app.services.assistant import handle_query
-from app.services.backend_client import close_client
+from app.services.backend_client import (
+    close_client,
+    get_request_timings,
+    reset_request_timings,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,11 +62,13 @@ async def startup_event():
     # Lazily initialised on first use, but we can trigger the load here
     # to avoid cold-start latency on the first request.
     try:
-        from app.rag.embeddings import embed_query as _warm  # noqa: F401
+        from app.rag.embeddings import embed_query
         from app.rag.vector_store import get_collection
 
         collection = get_collection()
         logger.info("ChromaDB collection ready with %d documents.", collection.count())
+        embed_query("startup warm-up")
+        logger.info("Embedding model ready for requests.")
         if collection.count() == 0:
             logger.warning(
                 "The vector store is empty. Run `python -m app.rag.index` to populate it."
@@ -104,7 +110,22 @@ async def assistant_query(request: QueryRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     try:
+        reset_request_timings()
         response = await handle_query(request)
+        backend_timings = get_request_timings()
+        response.timing["backend_requests"] = [
+            {
+                "operation": item["operation"],
+                "start": item["start"],
+                "end": item["end"],
+                "latency_ms": item["latency_ms"],
+            }
+            for item in backend_timings
+        ]
+        response.timing["backend_total_ms"] = round(
+            sum(item["latency_ms"] for item in backend_timings),
+            2,
+        )
         return response
     except Exception as exc:
         logger.exception("Error processing query: %s", request.query)

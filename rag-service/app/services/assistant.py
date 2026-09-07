@@ -1,12 +1,12 @@
 """RetailMate AI Assistant — the main orchestration layer.
 
 Combines intent detection, RAG retrieval, and backend API calls
-to produce structured ``QueryResponse`` objects.
+to produce structured QueryResponse objects.
 
 Source-of-truth separation
 --------------------------
-- **Policy knowledge** → RAG / ChromaDB (from the policy PDF)
-- **Transactional data** → Member 3 backend HTTP APIs
+- Policy knowledge → RAG / ChromaDB
+- Transactional data → Member 3 backend HTTP APIs
 """
 
 from __future__ import annotations
@@ -29,310 +29,885 @@ from app.models.schemas import (
 from app.rag.retriever import retrieve, RetrievalResult
 from app.services import intent_detector as detector
 from app.services import backend_client as backend
+from app.services.language import (
+    localize_inventory_answer,
+    localize_location_answer,
+    normalize_language,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ======================================================================== #
-#                            PUBLIC ENTRY POINT                             #
-# ======================================================================== #
+# ---------------------------------------------------------------------- #
+# MAIN QUERY HANDLER
+# ---------------------------------------------------------------------- #
+
 async def handle_query(request: QueryRequest) -> QueryResponse:
-    """Process a user query end-to-end and return a structured response."""
+    """Main entry point for processing an assistant query."""
+
     query = request.query.strip()
-    intent = detector.detect_intent(query)
+    request.language = normalize_language(request.language)
 
-    logger.info("Query: %r → intent=%s", query, intent.value)
-
-    try:
-        handler = _HANDLERS.get(intent, _handle_general)
-        response = await handler(query, request, intent)
-        response.session_id = request.session_id
-        response.language = request.language or "en"
-        return response
-    except Exception:
-        logger.exception("Unhandled error processing query")
+    if not query:
         return QueryResponse(
-            intent=intent.value,
-            answer="I'm sorry, I encountered an error processing your request. Please try again.",
+            intent=Intent.GENERAL_QUERY.value,
+            answer="Please provide a question or request.",
             confidence=0.0,
             session_id=request.session_id,
             language=request.language or "en",
         )
 
+    intent = detector.detect_intent(query)
 
-# ======================================================================== #
-#                         INTENT-SPECIFIC HANDLERS                          #
-# ======================================================================== #
+    if intent == Intent.POLICY_QUERY:
+        return await _handle_policy(query, request, intent)
+
+    if intent == Intent.INVENTORY_QUERY:
+        return await _handle_inventory(query, request, intent)
+
+    if intent == Intent.PRODUCT_LOCATION:
+        return await _handle_product_location(query, request, intent)
+
+    if intent == Intent.RETURN_REQUEST:
+        return await _handle_return(query, request, intent)
+
+    if intent == Intent.EXCHANGE_REQUEST:
+        return await _handle_exchange(query, request, intent)
+
+    return await _handle_general(query, request, intent)
+
+
+# ---------------------------------------------------------------------- #
+# COMMON HELPERS
+# ---------------------------------------------------------------------- #
+
+def _build_sources(results: list[RetrievalResult]) -> list[Source]:
+    """Convert RAG retrieval results into API response sources."""
+
+    sources: list[Source] = []
+
+    for result in results:
+        metadata = result.metadata or {}
+
+        source_name = (
+            metadata.get("source")
+            or metadata.get("file")
+            or metadata.get("filename")
+            or "knowledge_base"
+        )
+
+        title = (
+            metadata.get("title")
+            or metadata.get("document")
+            or source_name
+        )
+
+        page = metadata.get("page")
+
+        try:
+            page_value = int(page) if page is not None else None
+        except (TypeError, ValueError):
+            page_value = None
+
+        relevance = getattr(result, "relevance", None)
+
+        if relevance is None:
+            relevance = getattr(result, "score", None)
+
+        try:
+            relevance_value = (
+                float(relevance)
+                if relevance is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            relevance_value = None
+
+        sources.append(
+            Source(
+                title=str(title) if title else None,
+                source=str(source_name),
+                page=page_value,
+                relevance=relevance_value,
+            )
+        )
+
+    return sources
+
+
+def _find_category_chunk(
+    results: list[RetrievalResult],
+    keywords: list[str],
+) -> RetrievalResult | None:
+    """Find the first retrieval result matching one of the keywords."""
+
+    for result in results:
+        text_lower = result.text.lower()
+
+        if any(keyword.lower() in text_lower for keyword in keywords):
+            return result
+
+    return None
+
+
+def _extract_order_id(query: str) -> Optional[str]:
+    """Extract an order ID such as ORD001 from a natural-language query."""
+
+    patterns = [
+        r"\border\s*(?:id|number)?\s*[:#-]?\s*(ORD\d+)\b",
+        r"\b(ORD\d+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).upper()
+
+    return None
+
+
+def _extract_product_id(query: str) -> Optional[str]:
+    """Extract a product ID such as P005 from a query."""
+
+    patterns = [
+        r"\bproduct\s*(?:id|number)?\s*[:#-]?\s*(P\d+)\b",
+        r"\b(P\d+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).upper()
+
+    return None
+
+
+def _extract_replacement_product_id(query: str) -> Optional[str]:
+    """Extract replacement product ID for exchange requests."""
+
+    patterns = [
+        r"\breplacement\s+(?:product\s*)?(?:id|number)?\s*[:#-]?\s*(P\d+)\b",
+        r"\breplace(?:ment)?\s+(?:with|by)\s+(P\d+)\b",
+        r"\bexchange\s+(?:for|with)\s+(P\d+)\b",
+        r"\bfor\s+(P\d+)\b",
+        r"\bto\s+(P\d+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).upper()
+
+    return None
+
+
+# ---------------------------------------------------------------------- #
+# PRODUCT SEARCH VARIANTS
+# ---------------------------------------------------------------------- #
+
+def _product_search_variants(search_term: str) -> list[str]:
+    """Generate conservative singular/plural product-name variants.
+
+    The original search term is always attempted first.
+
+    Examples:
+        Nike Dri-FIT T-Shirts -> Nike Dri-FIT T-Shirt
+        Nike Shoes            -> Nike Shoe
+        Wireless Headphones   -> Wireless Headphone
+        Water Bottles         -> Water Bottle
+    """
+
+    term = search_term.strip()
+
+    if not term:
+        return []
+
+    variants: list[str] = []
+
+    replacements = [
+        (r"\bt-shirts\b", "T-Shirt"),
+        (r"\btshirt(s)?\b", "T-Shirt"),
+        (r"\bshirts\b", "Shirt"),
+        (r"\bshoes\b", "Shoe"),
+        (r"\bheadphones\b", "Headphone"),
+        (r"\bbottles\b", "Bottle"),
+        (r"\bjackets\b", "Jacket"),
+        (r"\bwatches\b", "Watch"),
+    ]
+
+    for pattern, replacement in replacements:
+        variant = re.sub(
+            pattern,
+            replacement,
+            term,
+            flags=re.IGNORECASE,
+        )
+
+        if variant.lower() != term.lower():
+            variants.append(variant)
+
+    # Conservative generic singularization of the final word.
+    words = term.split()
+
+    if words:
+        last_word = words[-1]
+
+        lower_word = last_word.lower()
+
+        if (
+            len(last_word) > 3
+            and lower_word.endswith("s")
+            and not lower_word.endswith(("ss", "us", "is"))
+        ):
+            generic_words = words.copy()
+            generic_words[-1] = last_word[:-1]
+
+            generic_variant = " ".join(generic_words)
+
+            if generic_variant.lower() != term.lower():
+                variants.append(generic_variant)
+
+    # Remove duplicates.
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for variant in variants:
+        variant = variant.strip()
+
+        if not variant:
+            continue
+
+        key = variant.lower()
+
+        if key not in seen:
+            seen.add(key)
+            result.append(variant)
+
+    return result
+
+
+async def _search_products_with_variants(
+    search_term: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Search the backend using the original term and natural-language variants."""
+
+    products = await backend.search_products(search_term)
+
+    if products:
+        return search_term, products
+
+    variants = _product_search_variants(search_term)
+
+    for variant in variants:
+        logger.info(
+            "No backend product match for '%s'; trying '%s'",
+            search_term,
+            variant,
+        )
+
+        products = await backend.search_products(variant)
+
+        if products:
+            return variant, products
+
+    return search_term, []
+
 
 # ---------------------------------------------------------------------- #
 # POLICY_QUERY
 # ---------------------------------------------------------------------- #
+
 async def _handle_policy(
-    query: str, request: QueryRequest, intent: Intent
+    query: str,
+    request: QueryRequest,
+    intent: Intent,
 ) -> QueryResponse:
-    """Answer policy questions using RAG retrieval only."""
-    results = retrieve(query, document_type="policy")
-    if not results:
-        # Fall back to all document types
-        results = retrieve(query)
+    """Answer policy questions using RAG."""
+
+    results = retrieve(
+        query,
+        document_type="policy",
+    )
 
     if not results:
         return QueryResponse(
             intent=intent.value,
             answer=(
-                "I couldn't find specific policy information for your question. "
-                "Please refer to the Order Cancellation and Return Policy document "
-                "or contact customer support for assistance."
+                "I couldn't find relevant information in the store policy."
             ),
-            confidence=0.3,
+            confidence=0.2,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
 
-    context = _build_context(results)
-    answer = _generate_policy_answer(query, context, results)
-    sources = _build_sources(results)
+    answer_text = results[0].text.strip()
+
+    q_lower = query.lower()
+
+    # Prefer more relevant policy chunks for common policy topics.
+    if any(
+        word in q_lower
+        for word in [
+            "return",
+            "refund",
+            "money back",
+        ]
+    ):
+        chunk = _find_category_chunk(
+            results,
+            [
+                "return",
+                "refund",
+                "eligible",
+                "days",
+            ],
+        )
+
+        if chunk:
+            answer_text = chunk.text.strip()
+
+    elif any(
+        word in q_lower
+        for word in [
+            "exchange",
+            "replacement",
+        ]
+    ):
+        chunk = _find_category_chunk(
+            results,
+            [
+                "exchange",
+                "replacement",
+            ],
+        )
+
+        if chunk:
+            answer_text = chunk.text.strip()
+
+    elif any(
+        word in q_lower
+        for word in [
+            "footwear",
+            "shoe",
+            "shoes",
+            "sneaker",
+            "sandal",
+        ]
+    ):
+        chunk = _find_category_chunk(
+            results,
+            [
+                "footwear",
+                "lifestyle",
+            ],
+        )
+
+        if chunk:
+            answer_text = chunk.text.strip()
+
+    elif any(
+        word in q_lower
+        for word in [
+            "electronics",
+            "mobile",
+            "laptop",
+            "phone",
+            "tablet",
+        ]
+    ):
+        chunk = _find_category_chunk(
+            results,
+            [
+                "electronics",
+                "mobile",
+                "laptop",
+            ],
+        )
+
+        if chunk:
+            answer_text = chunk.text.strip()
+
+    elif any(
+        word in q_lower
+        for word in [
+            "cancel",
+            "cancellation",
+        ]
+    ):
+        chunk = _find_category_chunk(
+            results,
+            [
+                "cancel",
+                "cancellation",
+            ],
+        )
+
+        if chunk:
+            answer_text = chunk.text.strip()
+
+    elif any(
+        word in q_lower
+        for word in [
+            "condition",
+            "pickup",
+            "undamaged",
+            "unused",
+            "packaging",
+        ]
+    ):
+        chunk = _find_category_chunk(
+            results,
+            [
+                "pickup",
+                "condition",
+                "unused",
+                "undamaged",
+                "packaging",
+            ],
+        )
+
+        if chunk:
+            answer_text = chunk.text.strip()
+
+    elif any(
+        word in q_lower
+        for word in [
+            "non-returnable",
+            "cannot be returned",
+            "not returnable",
+        ]
+    ):
+        chunk = _find_category_chunk(
+            results,
+            [
+                "non-returnable",
+                "non returnable",
+                "no return",
+            ],
+        )
+
+        if chunk:
+            answer_text = chunk.text.strip()
 
     return QueryResponse(
         intent=intent.value,
-        answer=answer,
-        sources=sources,
-        confidence=_avg_relevance(results),
+        answer=answer_text,
+        sources=_build_sources(results),
+        confidence=0.9,
+        session_id=request.session_id,
+        language=request.language or "en",
     )
-
-
-def _generate_policy_answer(
-    query: str, context: str, results: list[RetrievalResult]
-) -> str:
-    """Construct a policy answer from retrieved context.
-
-    This is a context-passthrouth approach: we present the most relevant
-    retrieved text as the answer, prefixed with a natural-language preamble.
-    We do NOT invent policy rules.
-    """
-    q_lower = query.lower()
-    preamble = "Based on the Order Cancellation and Return Policy:\n\n"
-
-    # Select the most relevant chunk(s)
-    best = results[0]
-    answer_text = best.text.strip()
-
-    # If the user is asking about a specific category, try to find it
-    if any(
-        w in q_lower
-        for w in ["footwear", "shoe", "shoes", "sneaker", "sandal"]
-    ):
-        cat_chunk = _find_category_chunk(results, ["footwear", "lifestyle"])
-        if cat_chunk:
-            answer_text = cat_chunk.text.strip()
-
-    elif any(w in q_lower for w in ["electronics", "mobile", "laptop", "phone", "tablet"]):
-        cat_chunk = _find_category_chunk(results, ["electronics", "mobile", "laptop"])
-        if cat_chunk:
-            answer_text = cat_chunk.text.strip()
-
-    elif any(w in q_lower for w in ["cancel", "cancellation"]):
-        cat_chunk = _find_category_chunk(results, ["cancel", "cancellation"])
-        if cat_chunk:
-            answer_text = cat_chunk.text.strip()
-
-    elif any(
-        w in q_lower for w in ["condition", "pickup", "undamaged", "unused", "packaging"]
-    ):
-        cat_chunk = _find_category_chunk(
-            results, ["pickup", "condition", "unused", "undamaged", "packaging"]
-        )
-        if cat_chunk:
-            answer_text = cat_chunk.text.strip()
-
-    elif any(w in q_lower for w in ["non-returnable", "cannot be returned", "not returnable"]):
-        cat_chunk = _find_category_chunk(results, ["non-returnable", "non returnable", "no return"])
-        if cat_chunk:
-            answer_text = cat_chunk.text.strip()
-
-    return preamble + answer_text
-
-
-def _find_category_chunk(
-    results: list[RetrievalResult], keywords: list[str]
-) -> RetrievalResult | None:
-    """Find the chunk whose text best matches the given keywords."""
-    for r in results:
-        text_lower = r.text.lower()
-        if any(kw in text_lower for kw in keywords):
-            return r
-    return None
 
 
 # ---------------------------------------------------------------------- #
 # INVENTORY_QUERY
 # ---------------------------------------------------------------------- #
+
 async def _handle_inventory(
-    query: str, request: QueryRequest, intent: Intent
+    query: str,
+    request: QueryRequest,
+    intent: Intent,
 ) -> QueryResponse:
     """Check product availability via backend APIs."""
+
     search_term = detector.extract_product_query(query)
-    products = await backend.search_products(search_term)
+
+    # Original search first, followed by singular/plural variants.
+    search_term, products = await _search_products_with_variants(
+        search_term
+    )
 
     if not products:
-        # Try RAG for product info
-        rag_results = retrieve(search_term, document_type="product")
+        # Backend did not return a product.
+        # Try RAG for product information as a fallback.
+        rag_results = retrieve(
+            search_term,
+            document_type="product",
+        )
+
         if rag_results:
             return QueryResponse(
                 intent=intent.value,
                 answer=(
-                    f"I found product information for '{search_term}' in our catalog, "
-                    "but I'm unable to verify live inventory at the moment. "
-                    "The backend service may be unavailable."
+                    f"I found product information for '{search_term}' "
+                    "in our catalog, but I'm unable to verify live "
+                    "inventory at the moment. The backend service "
+                    "may be unavailable."
                 ),
                 sources=_build_sources(rag_results),
                 confidence=0.5,
+                session_id=request.session_id,
+                language=request.language or "en",
             )
+
         return QueryResponse(
             intent=intent.value,
-            answer=f"I couldn't find any products matching '{search_term}'. Please try a different search term.",
+            answer=(
+                f"I couldn't find any products matching "
+                f"'{search_term}'. Please try a different search term."
+            ),
             confidence=0.4,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
 
-    # Enrich with inventory data
+    # ---------------------------------------------------------------
+    # Enrich products with live inventory.
+    # ---------------------------------------------------------------
+
     enriched_products: list[ProductInfo] = []
     answer_parts: list[str] = []
 
-    for p in products[:5]:  # Limit to top 5
-        pid = p.get("product_id", p.get("id", ""))
-        inv = await backend.get_inventory(pid) if pid else None
+    for product in products[:5]:
+        pid = product.get(
+            "product_id",
+            product.get("id", ""),
+        )
 
-        stock = None
-        if inv:
-            stock = inv.get("stock_quantity", inv.get("quantity", inv.get("stock")))
+        inventory_response = (
+            await backend.get_inventory(pid)
+            if pid
+            else None
+        )
 
-        location = None
-        loc_data = p.get("location")
+        stock: Optional[int] = None
+
+        if inventory_response:
+            # Current Member 3 format:
+            #
+            # {
+            #   "product_id": "P005",
+            #   "available": true,
+            #   "inventory": [
+            #       {
+            #           "store_location": "...",
+            #           "aisle": "...",
+            #           "shelf": "...",
+            #           "stock_quantity": 14
+            #       }
+            #   ]
+            # }
+            #
+            # Sum stock across all stores.
+
+            inventory_records = inventory_response.get(
+                "inventory",
+                []
+            )
+
+            if isinstance(inventory_records, list):
+                quantities: list[int] = []
+
+                for record in inventory_records:
+                    if not isinstance(record, dict):
+                        continue
+
+                    quantity = record.get("stock_quantity")
+
+                    if quantity is None:
+                        continue
+
+                    try:
+                        quantities.append(int(quantity))
+                    except (TypeError, ValueError):
+                        continue
+
+                if quantities:
+                    stock = sum(quantities)
+
+            # Fallback for flat inventory response formats.
+            if stock is None:
+                flat_stock = inventory_response.get(
+                    "stock_quantity",
+                    inventory_response.get(
+                        "quantity",
+                        inventory_response.get("stock"),
+                    ),
+                )
+
+                if flat_stock is not None:
+                    try:
+                        stock = int(flat_stock)
+                    except (TypeError, ValueError):
+                        stock = None
+
+        # -----------------------------------------------------------
+        # Product location.
+        # -----------------------------------------------------------
+
+        location: Optional[ProductLocation] = None
+
+        loc_data = product.get("location")
+
         if loc_data and isinstance(loc_data, dict):
-            location = ProductLocation(**{k: v for k, v in loc_data.items() if k in ProductLocation.model_fields})
+            try:
+                location = ProductLocation(
+                    **{
+                        key: value
+                        for key, value in loc_data.items()
+                        if key in ProductLocation.model_fields
+                    }
+                )
+            except Exception:
+                location = None
+
+        # If the backend inventory response contains locations,
+        # use the first one when product data does not already have
+        # a location.
+        if location is None and inventory_response:
+            inventory_records = inventory_response.get(
+                "inventory",
+                []
+            )
+
+            if (
+                isinstance(inventory_records, list)
+                and inventory_records
+            ):
+                first_record = inventory_records[0]
+
+                if isinstance(first_record, dict):
+                    location = ProductLocation(
+                        store=first_record.get("store_location"),
+                        aisle=first_record.get("aisle"),
+                        shelf=first_record.get("shelf"),
+                    )
 
         product_info = ProductInfo(
             product_id=str(pid),
-            name=p.get("name", "Unknown"),
-            brand=p.get("brand"),
-            category=p.get("category"),
-            color=p.get("color"),
-            size=str(p.get("size", "")) if p.get("size") else None,
-            price=p.get("price"),
-            image_url=p.get("image_url", ""),
+            name=product.get(
+                "name",
+                "Unknown",
+            ),
+            brand=product.get("brand"),
+            category=product.get("category"),
+            color=product.get("color"),
+            size=(
+                str(product.get("size"))
+                if product.get("size")
+                else None
+            ),
+            price=product.get("price"),
+            image_url=product.get(
+                "image_url",
+                "",
+            ),
             stock_quantity=stock,
             location=location,
-            description=p.get("description"),
+            description=product.get("description"),
         )
+
         enriched_products.append(product_info)
 
-        name = product_info.name
-        if stock is not None:
-            status = f"in stock ({stock} available)" if stock > 0 else "currently out of stock"
-            answer_parts.append(f"• {name}: {status}")
-        else:
-            answer_parts.append(f"• {name}: found in catalog")
+        # -----------------------------------------------------------
+        # Human-readable answer.
+        # -----------------------------------------------------------
 
-    answer = "Here's what I found:\n\n" + "\n".join(answer_parts)
+        answer_parts.append(
+            localize_inventory_answer(
+                name=product_info.name,
+                stock=stock,
+                language=request.language,
+            )
+        )
 
     return QueryResponse(
         intent=intent.value,
-        answer=answer,
+        answer=" ".join(answer_parts),
         products=enriched_products,
-        confidence=0.85,
+        confidence=0.95,
+        session_id=request.session_id,
+        language=request.language or "en",
     )
 
 
 # ---------------------------------------------------------------------- #
 # PRODUCT_LOCATION
 # ---------------------------------------------------------------------- #
+
 async def _handle_product_location(
-    query: str, request: QueryRequest, intent: Intent
+    query: str,
+    request: QueryRequest,
+    intent: Intent,
 ) -> QueryResponse:
-    """Answer product-location questions using backend + RAG store info."""
+    """Find where a product is located in the store."""
+
     search_term = detector.extract_product_query(query)
 
-    # Try backend product search first
-    products = await backend.search_products(search_term)
-    if products:
-        product_infos: list[ProductInfo] = []
-        answer_parts: list[str] = []
-        for p in products[:5]:
-            loc_data = p.get("location")
-            location = None
-            loc_str = "location information unavailable"
-            if loc_data and isinstance(loc_data, dict):
-                location = ProductLocation(**{k: v for k, v in loc_data.items() if k in ProductLocation.model_fields})
-                parts = []
-                if loc_data.get("store"):
-                    parts.append(f"Store: {loc_data['store']}")
-                if loc_data.get("aisle"):
-                    parts.append(f"Aisle {loc_data['aisle']}")
-                if loc_data.get("shelf"):
-                    parts.append(f"Shelf {loc_data['shelf']}")
-                loc_str = ", ".join(parts) if parts else "location information unavailable"
+    search_term, products = await _search_products_with_variants(
+        search_term
+    )
 
-            pid = p.get("product_id", p.get("id", ""))
-            product_infos.append(
-                ProductInfo(
-                    product_id=str(pid),
-                    name=p.get("name", "Unknown"),
-                    brand=p.get("brand"),
-                    category=p.get("category"),
-                    color=p.get("color"),
-                    size=str(p.get("size", "")) if p.get("size") else None,
-                    price=p.get("price"),
-                    location=location,
+    if not products:
+        return QueryResponse(
+            intent=intent.value,
+            answer=(
+                f"I couldn't find a product matching "
+                f"'{search_term}' in our catalog."
+            ),
+            confidence=0.35,
+            session_id=request.session_id,
+            language=request.language or "en",
+        )
+
+    enriched_products: list[ProductInfo] = []
+    answer_parts: list[str] = []
+
+    for product in products[:5]:
+        pid = product.get(
+            "product_id",
+            product.get("id", ""),
+        )
+
+        inventory_response = (
+            await backend.get_inventory(pid)
+            if pid
+            else None
+        )
+
+        location: Optional[ProductLocation] = None
+
+        loc_data = product.get("location")
+
+        if loc_data and isinstance(loc_data, dict):
+            try:
+                location = ProductLocation(
+                    **{
+                        key: value
+                        for key, value in loc_data.items()
+                        if key in ProductLocation.model_fields
+                    }
+                )
+            except Exception:
+                location = None
+
+        if location is None and inventory_response:
+            records = inventory_response.get(
+                "inventory",
+                [],
+            )
+
+            if isinstance(records, list) and records:
+                first = records[0]
+
+                if isinstance(first, dict):
+                    location = ProductLocation(
+                        store=first.get("store_location"),
+                        aisle=first.get("aisle"),
+                        shelf=first.get("shelf"),
+                    )
+
+        product_info = ProductInfo(
+            product_id=str(pid),
+            name=product.get(
+                "name",
+                "Unknown",
+            ),
+            brand=product.get("brand"),
+            category=product.get("category"),
+            color=product.get("color"),
+            size=(
+                str(product.get("size"))
+                if product.get("size")
+                else None
+            ),
+            price=product.get("price"),
+            image_url=product.get(
+                "image_url",
+                "",
+            ),
+            location=location,
+            description=product.get("description"),
+        )
+
+        enriched_products.append(product_info)
+
+        if location:
+            location_parts: list[str] = []
+
+            if location.store:
+                location_parts.append(location.store)
+
+            if location.aisle:
+                location_parts.append(
+                    f"Aisle {location.aisle}"
+                )
+
+            if location.shelf:
+                location_parts.append(
+                    f"Shelf {location.shelf}"
+                )
+
+            answer_parts.append(
+                localize_location_answer(
+                    name=product_info.name,
+                    store=location.store,
+                    aisle=location.aisle,
+                    shelf=location.shelf,
+                    language=request.language,
                 )
             )
-            answer_parts.append(f"• {p.get('name', 'Unknown')}: {loc_str}")
 
-        answer = "Here's where you can find the products:\n\n" + "\n".join(answer_parts)
-        return QueryResponse(
-            intent=intent.value,
-            answer=answer,
-            products=product_infos,
-            confidence=0.85,
-        )
-
-    # Fall back to RAG (product catalog + store info)
-    results = retrieve(search_term)
-    if results:
-        context_text = results[0].text
-        return QueryResponse(
-            intent=intent.value,
-            answer=f"Based on our store information:\n\n{context_text}",
-            sources=_build_sources(results),
-            confidence=_avg_relevance(results),
-        )
+        else:
+            answer_parts.append(
+                f"I found {product_info.name}, but I couldn't "
+                "verify its store location."
+            )
 
     return QueryResponse(
         intent=intent.value,
-        answer=f"I couldn't find location information for '{search_term}'. Please ask a store associate for help.",
-        confidence=0.3,
+        answer=" ".join(answer_parts),
+        products=enriched_products,
+        confidence=0.95,
+        session_id=request.session_id,
+        language=request.language or "en",
     )
 
 
 # ---------------------------------------------------------------------- #
 # RETURN_REQUEST
 # ---------------------------------------------------------------------- #
-async def _handle_return(
-    query: str, request: QueryRequest, intent: Intent
-) -> QueryResponse:
-    """Orchestrate a return request via backend APIs."""
-    order_id = detector.extract_order_id(query)
-    product_id = detector.extract_product_id(query)
 
-    # Missing information
-    missing: list[str] = []
+async def _handle_return(
+    query: str,
+    request: QueryRequest,
+    intent: Intent,
+) -> QueryResponse:
+    """Check and initiate product returns."""
+
+    order_id = _extract_order_id(query)
+    product_id = _extract_product_id(query)
+
+    missing_information: list[str] = []
+
     if not order_id:
-        missing.append("order_id")
+        missing_information.append("order_id")
+
     if not product_id:
-        # We'll try to get it from the order
-        pass
+        missing_information.append("product_id")
 
     if not order_id:
         return QueryResponse(
             intent=intent.value,
-            answer="I'd be happy to help you with your return. Could you please provide your order ID (e.g. ORD001)?",
+            answer=(
+                "I can help you with the return. "
+                "Please provide your order ID and product ID."
+            ),
             action_required=True,
             action=Action(
                 type=ActionType.RETURN,
@@ -340,358 +915,324 @@ async def _handle_return(
                 required_information=["order_id"],
             ),
             missing_information=["order_id"],
-            confidence=0.7,
-        )
-
-    # Fetch order details
-    order = await backend.get_order(order_id)
-    if not order:
-        return QueryResponse(
-            intent=intent.value,
-            answer=f"I couldn't find order {order_id}. Please check the order ID and try again.",
-            action_required=True,
-            action=Action(
-                type=ActionType.RETURN,
-                status=ActionStatus.FAILED,
-                message=f"Order {order_id} not found",
-            ),
-            confidence=0.6,
-        )
-
-    # Extract product_id from order if not provided
-    if not product_id:
-        product_id = _extract_product_from_order(order)
-        if not product_id:
-            return QueryResponse(
-                intent=intent.value,
-                answer=(
-                    f"I found order {order_id}. Which product would you like to return? "
-                    "Please provide the product ID."
-                ),
-                action_required=True,
-                action=Action(
-                    type=ActionType.RETURN,
-                    status=ActionStatus.PENDING,
-                    required_information=["product_id"],
-                ),
-                missing_information=["product_id"],
-                confidence=0.7,
-            )
-
-    # Get policy context for additional info
-    policy_results = retrieve("return policy conditions", document_type="policy", top_k=2)
-    policy_sources = _build_sources(policy_results) if policy_results else []
-
-    # Check return eligibility
-    check_result = await backend.check_return(order_id, product_id)
-    if check_result is None:
-        return QueryResponse(
-            intent=intent.value,
-            answer=(
-                f"I'm unable to check return eligibility for order {order_id} right now. "
-                "The backend service may be unavailable. Please try again later."
-            ),
-            action_required=True,
-            action=Action(
-                type=ActionType.RETURN,
-                status=ActionStatus.FAILED,
-                message="Backend service unavailable",
-            ),
-            sources=policy_sources,
-            confidence=0.4,
-        )
-
-    if not check_result.get("eligible", False):
-        reasons = check_result.get("reasons", [])
-        message = check_result.get("message", "This product is not eligible for return.")
-        reasons_text = ""
-        if reasons:
-            reasons_text = "\n\nReasons: " + ", ".join(str(r) for r in reasons)
-
-        return QueryResponse(
-            intent=intent.value,
-            answer=f"Return for order {order_id} (product {product_id}) is not eligible. {message}{reasons_text}",
-            action_required=False,
-            action=Action(
-                type=ActionType.RETURN,
-                status=ActionStatus.FAILED,
-                message=message,
-            ),
-            sources=policy_sources,
             confidence=0.8,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
 
-    # Eligible — initiate return
-    initiate_result = await backend.initiate_return(order_id, product_id)
-    if not initiate_result:
+    if order_id and not product_id:
+        order = await backend.get_order(order_id)
+        product_id = (
+            order.get("product_id")
+            if order
+            else None
+        )
+
+        if product_id:
+            missing_information = []
+        else:
+            missing_information.append("product_id")
+
+    if missing_information:
         return QueryResponse(
             intent=intent.value,
-            answer=f"Your return for order {order_id} is eligible, but I was unable to initiate it. Please try again.",
+            answer=(
+                "I can help you with the return, but I couldn't find "
+                "the product linked to that order. Please provide the "
+                "product ID."
+            ),
+            action_required=True,
+            action=Action(
+                type=ActionType.RETURN,
+                status=ActionStatus.PENDING,
+                required_information=missing_information,
+            ),
+            missing_information=missing_information,
+            confidence=0.7,
+            session_id=request.session_id,
+            language=request.language or "en",
+        )
+
+    eligibility = await backend.check_return(
+        order_id,
+        product_id,
+    )
+
+    if not eligibility:
+        return QueryResponse(
+            intent=intent.value,
+            answer=(
+                "I couldn't verify the return eligibility right now."
+            ),
             action_required=True,
             action=Action(
                 type=ActionType.RETURN,
                 status=ActionStatus.FAILED,
-                message="Return initiation failed",
+                message="Return eligibility could not be verified.",
             ),
-            sources=policy_sources,
-            confidence=0.6,
+            confidence=0.4,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
 
-    ticket_id = initiate_result.get("ticket_id")
-    status = initiate_result.get("status", "")
+    eligible = eligibility.get(
+        "eligible",
+        eligibility.get(
+            "is_eligible",
+            False,
+        ),
+    )
 
-    if status == "RETURN_INITIATED" or ticket_id:
+    if not eligible:
+        return QueryResponse(
+            intent=intent.value,
+            answer=eligibility.get(
+                "message",
+                "This item is not eligible for return.",
+            ),
+            action=Action(
+                type=ActionType.RETURN,
+                status=ActionStatus.FAILED,
+                message=eligibility.get("message"),
+            ),
+            confidence=0.9,
+            session_id=request.session_id,
+            language=request.language or "en",
+        )
+
+    result = await backend.initiate_return(
+        order_id,
+        product_id,
+    )
+
+    if not result:
         return QueryResponse(
             intent=intent.value,
             answer=(
-                f"Your return for order {order_id} (product {product_id}) has been successfully initiated! "
-                f"Your return ticket ID is: {ticket_id}. "
-                "Please keep the product in its original condition and packaging for pickup."
+                "The return is eligible, but I couldn't create "
+                "the return request right now."
             ),
-            action_required=False,
+            action_required=True,
             action=Action(
                 type=ActionType.RETURN,
-                status=ActionStatus.COMPLETED,
-                ticket_id=ticket_id,
+                status=ActionStatus.FAILED,
+                message="Return request could not be created.",
             ),
-            sources=policy_sources,
-            confidence=0.95,
+            confidence=0.7,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
 
-    # Unexpected backend response
+    ticket_id = (
+        result.get("ticket_id")
+        or result.get("return_id")
+        or result.get("id")
+    )
+
     return QueryResponse(
         intent=intent.value,
-        answer=f"Return request for order {order_id} has been submitted. Status: {status}",
-        action_required=True,
+        answer=(
+            "Your return has been initiated successfully."
+            + (
+                f" Your return ticket is {ticket_id}."
+                if ticket_id
+                else ""
+            )
+        ),
+        action_required=False,
         action=Action(
             type=ActionType.RETURN,
-            status=ActionStatus.PENDING,
-            message=str(initiate_result),
+            status=ActionStatus.COMPLETED,
+            ticket_id=ticket_id,
+            message=result.get("message"),
         ),
-        sources=policy_sources,
-        confidence=0.6,
+        confidence=0.98,
+        session_id=request.session_id,
+        language=request.language or "en",
     )
 
 
 # ---------------------------------------------------------------------- #
 # EXCHANGE_REQUEST
 # ---------------------------------------------------------------------- #
+
 async def _handle_exchange(
-    query: str, request: QueryRequest, intent: Intent
+    query: str,
+    request: QueryRequest,
+    intent: Intent,
 ) -> QueryResponse:
-    """Orchestrate an exchange request via backend APIs."""
-    order_id = detector.extract_order_id(query)
-    product_id = detector.extract_product_id(query)
+    """Check and initiate product exchanges."""
 
-    # Try to extract replacement product ID (second P-ID in the query)
-    all_pids = re.findall(r"\b(P\d{3,})\b", query, re.IGNORECASE)
-    replacement_pid = None
-    if len(all_pids) >= 2:
-        product_id = all_pids[0].upper()
-        replacement_pid = all_pids[1].upper()
-    elif len(all_pids) == 1 and product_id:
-        # Only one P-ID found, need replacement
-        pass
+    order_id = _extract_order_id(query)
+    product_id = _extract_product_id(query)
+    replacement_product_id = _extract_replacement_product_id(query)
 
-    missing: list[str] = []
+    missing_information: list[str] = []
+
     if not order_id:
-        missing.append("order_id")
-    if not product_id:
-        missing.append("product_id")
-    if not replacement_pid:
-        missing.append("replacement_product_id")
+        missing_information.append("order_id")
 
-    if missing:
-        info_needed = ", ".join(missing)
+    if not product_id:
+        missing_information.append("product_id")
+
+    if not replacement_product_id:
+        missing_information.append(
+            "replacement_product_id"
+        )
+
+    if missing_information:
         return QueryResponse(
             intent=intent.value,
             answer=(
-                "I'd be happy to help you with an exchange. "
-                f"I need the following information: {info_needed}. "
-                "For example: 'Exchange order ORD001 product P001 for P002'."
+                "I can help you with the exchange. "
+                "Please provide the order ID, current product ID, "
+                "and replacement product ID."
             ),
             action_required=True,
             action=Action(
                 type=ActionType.EXCHANGE,
                 status=ActionStatus.PENDING,
-                required_information=missing,
+                required_information=missing_information,
             ),
-            missing_information=missing,
-            confidence=0.6,
-        )
-
-    # Check exchange eligibility
-    check_result = await backend.check_exchange(order_id, product_id, replacement_pid)
-    if check_result is None:
-        return QueryResponse(
-            intent=intent.value,
-            answer="I'm unable to check exchange eligibility right now. The backend service may be unavailable.",
-            action_required=True,
-            action=Action(
-                type=ActionType.EXCHANGE,
-                status=ActionStatus.FAILED,
-                message="Backend service unavailable",
-            ),
-            confidence=0.4,
-        )
-
-    if not check_result.get("eligible", False):
-        message = check_result.get("message", "This exchange is not eligible.")
-        reasons = check_result.get("reasons", [])
-        reasons_text = ""
-        if reasons:
-            reasons_text = "\n\nReasons: " + ", ".join(str(r) for r in reasons)
-
-        return QueryResponse(
-            intent=intent.value,
-            answer=f"Exchange for order {order_id} is not eligible. {message}{reasons_text}",
-            action_required=False,
-            action=Action(
-                type=ActionType.EXCHANGE,
-                status=ActionStatus.FAILED,
-                message=message,
-            ),
+            missing_information=missing_information,
             confidence=0.8,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
 
-    # Eligible — initiate exchange
-    initiate_result = await backend.initiate_exchange(order_id, product_id, replacement_pid)
-    if not initiate_result:
-        return QueryResponse(
-            intent=intent.value,
-            answer=f"Exchange for order {order_id} is eligible, but I couldn't initiate it. Please try again.",
-            action_required=True,
-            action=Action(
-                type=ActionType.EXCHANGE,
-                status=ActionStatus.FAILED,
-                message="Exchange initiation failed",
-            ),
-            confidence=0.6,
-        )
+    eligibility = await backend.check_exchange(
+        order_id,
+        product_id,
+        replacement_product_id,
+    )
 
-    ticket_id = initiate_result.get("ticket_id")
-    status = initiate_result.get("status", "")
-
-    if status == "EXCHANGE_INITIATED" or ticket_id:
+    if not eligibility:
         return QueryResponse(
             intent=intent.value,
             answer=(
-                f"Your exchange for order {order_id} has been successfully initiated! "
-                f"Product {product_id} will be exchanged for {replacement_pid}. "
-                f"Your exchange ticket ID is: {ticket_id}."
+                "I couldn't verify the exchange eligibility right now."
             ),
-            action_required=False,
+            action_required=True,
             action=Action(
                 type=ActionType.EXCHANGE,
-                status=ActionStatus.COMPLETED,
-                ticket_id=ticket_id,
+                status=ActionStatus.FAILED,
+                message="Exchange eligibility could not be verified.",
             ),
-            confidence=0.95,
+            confidence=0.4,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
+
+    eligible = eligibility.get(
+        "eligible",
+        eligibility.get(
+            "is_eligible",
+            False,
+        ),
+    )
+
+    if not eligible:
+        return QueryResponse(
+            intent=intent.value,
+            answer=eligibility.get(
+                "message",
+                "This exchange is not currently eligible.",
+            ),
+            action=Action(
+                type=ActionType.EXCHANGE,
+                status=ActionStatus.FAILED,
+                message=eligibility.get("message"),
+            ),
+            confidence=0.9,
+            session_id=request.session_id,
+            language=request.language or "en",
+        )
+
+    result = await backend.initiate_exchange(
+        order_id,
+        product_id,
+        replacement_product_id,
+    )
+
+    if not result:
+        return QueryResponse(
+            intent=intent.value,
+            answer=(
+                "The exchange is eligible, but I couldn't create "
+                "the exchange request right now."
+            ),
+            action_required=True,
+            action=Action(
+                type=ActionType.EXCHANGE,
+                status=ActionStatus.FAILED,
+                message="Exchange request could not be created.",
+            ),
+            confidence=0.7,
+            session_id=request.session_id,
+            language=request.language or "en",
+        )
+
+    ticket_id = (
+        result.get("ticket_id")
+        or result.get("exchange_id")
+        or result.get("id")
+    )
 
     return QueryResponse(
         intent=intent.value,
-        answer=f"Exchange request submitted for order {order_id}. Status: {status}",
-        action_required=True,
+        answer=(
+            "Your exchange has been initiated successfully."
+            + (
+                f" Your exchange ticket is {ticket_id}."
+                if ticket_id
+                else ""
+            )
+        ),
+        action_required=False,
         action=Action(
             type=ActionType.EXCHANGE,
-            status=ActionStatus.PENDING,
-            message=str(initiate_result),
+            status=ActionStatus.COMPLETED,
+            ticket_id=ticket_id,
+            message=result.get("message"),
         ),
-        confidence=0.6,
+        confidence=0.98,
+        session_id=request.session_id,
+        language=request.language or "en",
     )
 
 
 # ---------------------------------------------------------------------- #
 # GENERAL_QUERY
 # ---------------------------------------------------------------------- #
+
 async def _handle_general(
-    query: str, request: QueryRequest, intent: Intent
+    query: str,
+    request: QueryRequest,
+    intent: Intent,
 ) -> QueryResponse:
-    """Handle general queries via RAG retrieval."""
+    """Handle general questions using the RAG knowledge base."""
+
     results = retrieve(query)
-    if results:
-        answer = results[0].text.strip()
+
+    if not results:
         return QueryResponse(
             intent=intent.value,
-            answer=answer,
-            sources=_build_sources(results),
-            confidence=_avg_relevance(results),
+            answer=(
+                "I'm sorry, I couldn't find relevant information "
+                "to answer that question."
+            ),
+            confidence=0.2,
+            session_id=request.session_id,
+            language=request.language or "en",
         )
+
+    answer = results[0].text.strip()
 
     return QueryResponse(
         intent=intent.value,
-        answer=(
-            "I'm RetailMate, your shopping assistant. I can help you with:\n\n"
-            "• Product search and availability\n"
-            "• Product locations in store\n"
-            "• Return and exchange policies\n"
-            "• Initiating returns or exchanges\n"
-            "• General store information\n\n"
-            "How can I assist you today?"
-        ),
-        confidence=0.5,
+        answer=answer,
+        sources=_build_sources(results),
+        confidence=0.8,
+        session_id=request.session_id,
+        language=request.language or "en",
     )
-
-
-# ======================================================================== #
-#                              HANDLER MAP                                  #
-# ======================================================================== #
-_HANDLERS = {
-    Intent.POLICY_QUERY: _handle_policy,
-    Intent.INVENTORY_QUERY: _handle_inventory,
-    Intent.PRODUCT_LOCATION: _handle_product_location,
-    Intent.RETURN_REQUEST: _handle_return,
-    Intent.EXCHANGE_REQUEST: _handle_exchange,
-    Intent.GENERAL_QUERY: _handle_general,
-}
-
-
-# ======================================================================== #
-#                              HELPERS                                      #
-# ======================================================================== #
-def _build_context(results: list[RetrievalResult]) -> str:
-    return "\n\n---\n\n".join(r.text for r in results)
-
-
-def _build_sources(results: list[RetrievalResult]) -> list[Source]:
-    sources = []
-    seen = set()
-    for r in results:
-        key = (r.metadata.get("source", ""), r.metadata.get("page"))
-        if key in seen:
-            continue
-        seen.add(key)
-        source_name = r.metadata.get("source", "unknown")
-        title = "Order Cancellation and Return Policy" if "policy" in source_name.lower() else source_name
-        page = r.metadata.get("page")
-        sources.append(
-            Source(
-                title=title,
-                source=source_name,
-                page=int(page) if page and str(page).isdigit() else None,
-                relevance=r.relevance,
-            )
-        )
-    return sources
-
-
-def _avg_relevance(results: list[RetrievalResult]) -> float:
-    if not results:
-        return 0.0
-    return round(sum(r.relevance for r in results) / len(results), 4)
-
-
-def _extract_product_from_order(order: dict) -> str | None:
-    """Try to extract a product_id from an order response."""
-    # Order may have: product_id, products, items, line_items
-    if order.get("product_id"):
-        return str(order["product_id"])
-    for key in ("products", "items", "line_items", "order_items"):
-        items = order.get(key)
-        if isinstance(items, list) and items:
-            first = items[0]
-            if isinstance(first, dict):
-                return str(first.get("product_id", first.get("id", "")))
-            return str(first)
-    return None

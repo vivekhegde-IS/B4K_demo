@@ -2,8 +2,7 @@
 const STORAGE_KEY = 'retailmate_api_base_url';
 const MOCK_MODE_KEY = 'retailmate_force_mock_mode';
 const CURRENCY_KEY = 'retailmate_currency';
-
-export const DEFAULT_API_BASE_URL = 'http://localhost:8000';
+export const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8003';
 export const USD_TO_INR_RATE = 85.50; // Standard exchange rate 1 USD = 85.50 INR
 
 export function getApiBaseUrl() {

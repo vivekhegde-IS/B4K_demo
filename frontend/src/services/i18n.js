@@ -2,10 +2,27 @@
 const LANGUAGE_KEY = 'retailmate_language';
 
 export const LANGUAGES = [
-  { code: 'en', name: 'English', native: 'English', speechLang: 'en-US', flag: '🇬🇧' },
+  { code: 'en', name: 'English', native: 'English', speechLang: 'en-IN', flag: '🇮🇳' },
   { code: 'hi', name: 'Hindi', native: 'हिंदी', speechLang: 'hi-IN', flag: '🇮🇳' },
   { code: 'kn', name: 'Kannada', native: 'ಕನ್ನಡ', speechLang: 'kn-IN', flag: '🇮🇳' }
 ];
+
+export const LANGUAGE_CODES = Object.freeze(
+  LANGUAGES.reduce((codes, language) => {
+    codes[language.code] = language.speechLang;
+    return codes;
+  }, {})
+);
+
+export function normalizeLanguage(code = 'en') {
+  return LANGUAGES.some((language) => language.code === code)
+    ? code
+    : 'en';
+}
+
+export function getSpeechLanguage(code = 'en') {
+  return LANGUAGE_CODES[normalizeLanguage(code)];
+}
 
 export function getStoredLanguage() {
   return localStorage.getItem(LANGUAGE_KEY) || 'en';

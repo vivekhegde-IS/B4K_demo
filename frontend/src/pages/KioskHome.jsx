@@ -69,7 +69,7 @@ export default function KioskHome({
     onAddChatMessage({ sender: 'user', text: q, time: new Date().toLocaleTimeString() });
 
     try {
-      const res = await queryAssistant(q, "demo-user");
+      const res = await queryAssistant(q, "demo-user", currentLang);
       setIsLoading(false);
 
       if (res && res.data) {

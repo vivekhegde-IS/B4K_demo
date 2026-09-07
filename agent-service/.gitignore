@@ -1,0 +1,7 @@
+
+# Member 4 generated/model files
+agent-service/app/models/*.onnx
+agent-service/app/models/*.bin
+agent-service/audio/
+agent-service/*.wav
+agent-service/*.json

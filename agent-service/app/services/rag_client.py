@@ -1,5 +1,7 @@
 from typing import Any, Optional
 import os
+import time
+from datetime import datetime, timezone
 
 import httpx
 
@@ -14,7 +16,7 @@ class RAGClient:
     def __init__(self):
         self.base_url = os.getenv(
             "RAG_SERVICE_URL",
-            "http://127.0.0.1:8000"
+            "http://127.0.0.1:8001"
         ).rstrip("/")
 
         self.timeout = float(
@@ -58,6 +60,9 @@ class RAGClient:
 
         url = f"{self.base_url}/api/assistant/query"
 
+        request_started = time.perf_counter()
+        request_started_at = datetime.now(timezone.utc).isoformat()
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
@@ -71,7 +76,19 @@ class RAGClient:
                     f"{response.text}"
                 )
 
-            return response.json()
+            result = response.json()
+            request_finished_at = datetime.now(timezone.utc).isoformat()
+            result["_agent_timing"] = {
+                "rag_request_start": request_started_at,
+                "rag_response_end": request_finished_at,
+                "rag_latency_ms": round(
+                    (time.perf_counter() - request_started) * 1000,
+                    2,
+                ),
+                "rag_first_response": None,
+                "rag_streaming": False,
+            }
+            return result
 
         except httpx.RequestError as exc:
             raise RuntimeError(

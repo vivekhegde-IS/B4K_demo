@@ -1,8 +1,7 @@
 from typing import Any, Optional
 
-from services.rag_client import RAGClient
-from services.backend_client import BackendClient
-
+from app.services.rag_client import RAGClient
+from app.services.backend_client import BackendClient
 
 class AgentTools:
     """

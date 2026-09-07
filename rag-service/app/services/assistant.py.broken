@@ -1,0 +1,799 @@
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+from app.services import backend_client as backend
+from app.services import intent_detector as detector
+logger = logging.getLogger(__name__)
+
+
+async def handle_query(request) -> dict[str, Any]:
+    """
+    Main orchestration layer for the RetailMate RAG assistant.
+
+    Routes the user's query based on the detected intent and combines
+    RAG knowledge with live backend data where required.
+    """
+
+    query = request.query.strip()
+    intent = detector.detect_intent(query)
+
+    base_response: dict[str, Any] = {
+        "intent": intent.value if hasattr(intent, "value") else str(intent),
+        "answer": "",
+        "products": [],
+        "sources": [],
+        "action_required": False,
+        "action": None,
+        "confidence": 0.0,
+        "missing_information": [],
+        "session_id": request.session_id,
+        "language": request.language or "en",
+    }
+
+    try:
+        if intent == detector.Intent.POLICY_QUERY:
+            result = await _handle_policy(query)
+
+        elif intent == detector.Intent.INVENTORY_QUERY:
+            result = await _handle_inventory(query)
+
+        elif intent == detector.Intent.PRODUCT_LOCATION:
+            result = await _handle_product_location(query)
+
+        elif intent == detector.Intent.RETURN_REQUEST:
+            result = await _handle_return(query)
+
+        elif intent == detector.Intent.EXCHANGE_REQUEST:
+            result = await _handle_exchange(query)
+
+        else:
+            result = await _handle_general(query)
+
+        base_response.update(result)
+        return base_response
+
+    except Exception as exc:
+        logger.exception("Assistant query failed")
+
+        base_response["answer"] = (
+            "I'm sorry, but I couldn't process that request right now."
+        )
+        base_response["confidence"] = 0.0
+        base_response["action_required"] = False
+        base_response["action"] = None
+
+        logger.error("Query error: %s", exc)
+
+        return base_response
+
+
+# ---------------------------------------------------------------------------
+# INVENTORY
+# ---------------------------------------------------------------------------
+
+async def _handle_inventory(query: str) -> dict[str, Any]:
+    """
+    Handle inventory queries.
+
+    The original product name is searched first. If no product is found,
+    common natural-language plural variations are tried automatically.
+    """
+
+    search_term = detector.extract_product_query(query)
+
+    products = await backend.search_products(search_term)
+
+    # ---------------------------------------------------------------
+    # Product-search fallback
+    # ---------------------------------------------------------------
+    # Backend catalog names may be singular while users naturally use
+    # plural forms, e.g.
+    #
+    #   Nike Dri-FIT T-Shirts
+    #                 ↓
+    #   Nike Dri-FIT T-Shirt
+    #
+    # Try reasonable alternatives if the original search returns nothing.
+    # ---------------------------------------------------------------
+
+    if not products:
+        for alternative in _product_search_variants(search_term):
+            if alternative.lower() == search_term.lower():
+                continue
+
+            logger.info(
+                "Inventory search returned no results for '%s'. "
+                "Trying alternative '%s'.",
+                search_term,
+                alternative,
+            )
+
+            products = await backend.search_products(alternative)
+
+            if products:
+                search_term = alternative
+                break
+
+    if not products:
+        return {
+            "answer": (
+                f"I couldn't find a product matching '{search_term}' "
+                "in our catalog."
+            ),
+            "products": [],
+            "sources": [],
+            "confidence": 0.35,
+        }
+
+    enriched_products: list[dict[str, Any]] = []
+
+    for product in products[:5]:
+        product_data = dict(product)
+
+        product_id = product_data.get(
+            "product_id",
+            product_data.get("id", "")
+        )
+
+        inventory_response = None
+
+        if product_id:
+            inventory_response = await backend.get_inventory(product_id)
+
+        stock = None
+
+        # -----------------------------------------------------------
+        # Current Member 3 inventory response:
+        #
+        # {
+        #   "product_id": "P005",
+        #   "available": true,
+        #   "inventory": [
+        #       {
+        #           "store_location": "...",
+        #           "aisle": "...",
+        #           "shelf": "...",
+        #           "stock_quantity": 14
+        #       }
+        #   ]
+        # }
+        #
+        # Sum stock across all stores.
+        # -----------------------------------------------------------
+
+        if inventory_response:
+            inventory_records = inventory_response.get(
+                "inventory",
+                []
+            )
+
+            if isinstance(inventory_records, list):
+                quantities: list[int] = []
+
+                for record in inventory_records:
+                    if not isinstance(record, dict):
+                        continue
+
+                    quantity = record.get("stock_quantity")
+
+                    if quantity is None:
+                        continue
+
+                    try:
+                        quantities.append(int(quantity))
+                    except (TypeError, ValueError):
+                        continue
+
+                if quantities:
+                    stock = sum(quantities)
+
+            # -------------------------------------------------------
+            # Fallback for alternate backend response formats.
+            # -------------------------------------------------------
+
+            if stock is None:
+                flat_stock = inventory_response.get(
+                    "stock_quantity",
+                    inventory_response.get(
+                        "quantity",
+                        inventory_response.get("stock")
+                    )
+                )
+
+                if flat_stock is not None:
+                    try:
+                        stock = int(flat_stock)
+                    except (TypeError, ValueError):
+                        stock = None
+
+        product_data["stock_quantity"] = stock
+
+        # -----------------------------------------------------------
+        # Convert Member 3 inventory locations into the schema
+        # expected by Member 2.
+        # -----------------------------------------------------------
+
+        if inventory_response:
+            inventory_records = inventory_response.get(
+                "inventory",
+                []
+            )
+
+            if isinstance(inventory_records, list) and inventory_records:
+                first_location = inventory_records[0]
+
+                if isinstance(first_location, dict):
+                    product_data["location"] = {
+                        "store": first_location.get("store_location"),
+                        "aisle": first_location.get("aisle"),
+                        "shelf": first_location.get("shelf"),
+                    }
+
+        enriched_products.append(product_data)
+
+    # ---------------------------------------------------------------
+    # Build human-readable answer.
+    # ---------------------------------------------------------------
+
+    answer_parts: list[str] = []
+
+    for product in enriched_products:
+        name = product.get("name", "Unknown product")
+        stock = product.get("stock_quantity")
+
+        if stock is not None:
+            if stock == 0:
+                answer_parts.append(
+                    f"{name} is currently out of stock."
+                )
+            elif stock == 1:
+                answer_parts.append(
+                    f"{name} has 1 unit available."
+                )
+            else:
+                answer_parts.append(
+                    f"{name} has {stock} units available."
+                )
+        else:
+            answer_parts.append(
+                f"I found {name}, but I couldn't verify its live inventory."
+            )
+
+    return {
+        "answer": " ".join(answer_parts),
+        "products": enriched_products,
+        "sources": [
+            {
+                "title": "products.json",
+                "source": "products.json",
+                "page": None,
+                "relevance": 1.0,
+            }
+        ],
+        "confidence": 0.95,
+    }
+
+
+def _product_search_variants(search_term: str) -> list[str]:
+    """
+    Generate conservative product-name alternatives.
+
+    The original search term should always be tried first by the caller.
+    These alternatives are only used when the backend returns no results.
+
+    Examples:
+        T-Shirts  -> T-Shirt
+        Shoes     -> Shoe
+        Headphones -> Headphone
+        Bottles   -> Bottle
+    """
+
+    term = search_term.strip()
+
+    if not term:
+        return []
+
+    variants: list[str] = []
+
+    # T-Shirts -> T-Shirt
+    variants.append(
+        re.sub(
+            r"\bt-shirts\b",
+            "T-Shirt",
+            term,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    # Shirts -> Shirt
+    variants.append(
+        re.sub(
+            r"\bshirts\b",
+            "Shirt",
+            term,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    # Shoes -> Shoe
+    variants.append(
+        re.sub(
+            r"\bshoes\b",
+            "Shoe",
+            term,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    # Headphones -> Headphone
+    variants.append(
+        re.sub(
+            r"\bheadphones\b",
+            "Headphone",
+            term,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    # Bottles -> Bottle
+    variants.append(
+        re.sub(
+            r"\bbottles\b",
+            "Bottle",
+            term,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    # Jackets -> Jacket
+    variants.append(
+        re.sub(
+            r"\bjackets\b",
+            "Jacket",
+            term,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    # Watches -> Watch
+    variants.append(
+        re.sub(
+            r"\bwatches\b",
+            "Watch",
+            term,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    # Generic simple plural fallback.
+    #
+    # Only apply to words ending in "s", avoiding words such as:
+    # jeans, electronics, accessories, etc.
+    words = term.split()
+
+    if words:
+        last_word = words[-1]
+
+        if (
+            len(last_word) > 3
+            and last_word.lower().endswith("s")
+            and not last_word.lower().endswith(("ss", "us", "is"))
+        ):
+            generic_words = words.copy()
+            generic_words[-1] = last_word[:-1]
+            variants.append(" ".join(generic_words))
+
+    # Remove duplicates and the original term.
+    unique_variants: list[str] = []
+    seen: set[str] = {term.lower()}
+
+    for variant in variants:
+        variant = variant.strip()
+
+        if not variant:
+            continue
+
+        key = variant.lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique_variants.append(variant)
+
+    return unique_variants
+
+
+# ---------------------------------------------------------------------------
+# PRODUCT LOCATION
+# ---------------------------------------------------------------------------
+
+async def _handle_product_location(query: str) -> dict[str, Any]:
+    search_term = detector.extract_product_query(query)
+
+    products = await backend.search_products(search_term)
+
+    if not products:
+        for alternative in _product_search_variants(search_term):
+            products = await backend.search_products(alternative)
+
+            if products:
+                break
+
+    if not products:
+        return {
+            "answer": (
+                f"I couldn't find a product matching '{search_term}' "
+                "in our catalog."
+            ),
+            "products": [],
+            "confidence": 0.35,
+        }
+
+    enriched_products: list[dict[str, Any]] = []
+
+    for product in products[:5]:
+        product_data = dict(product)
+
+        product_id = product_data.get(
+            "product_id",
+            product_data.get("id", "")
+        )
+
+        if product_id:
+            inventory_response = await backend.get_inventory(product_id)
+
+            if inventory_response:
+                inventory_records = inventory_response.get(
+                    "inventory",
+                    []
+                )
+
+                if (
+                    isinstance(inventory_records, list)
+                    and inventory_records
+                ):
+                    locations = []
+
+                    for record in inventory_records:
+                        if not isinstance(record, dict):
+                            continue
+
+                        locations.append(
+                            {
+                                "store": record.get("store_location"),
+                                "aisle": record.get("aisle"),
+                                "shelf": record.get("shelf"),
+                            }
+                        )
+
+                    product_data["locations"] = locations
+
+        enriched_products.append(product_data)
+
+    answer_parts: list[str] = []
+
+    for product in enriched_products:
+        name = product.get("name", "Unknown product")
+        locations = product.get("locations", [])
+
+        if not locations:
+            answer_parts.append(
+                f"I found {name}, but I couldn't verify its store location."
+            )
+            continue
+
+        location_text = []
+
+        for location in locations:
+            store = location.get("store")
+            aisle = location.get("aisle")
+            shelf = location.get("shelf")
+
+            parts = []
+
+            if store:
+                parts.append(store)
+
+            if aisle:
+                parts.append(f"Aisle {aisle}")
+
+            if shelf:
+                parts.append(f"Shelf {shelf}")
+
+            if parts:
+                location_text.append(", ".join(parts))
+
+        if location_text:
+            answer_parts.append(
+                f"{name} is available at " +
+                "; ".join(location_text) +
+                "."
+            )
+
+    return {
+        "answer": " ".join(answer_parts),
+        "products": enriched_products,
+        "confidence": 0.95,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POLICY
+# ---------------------------------------------------------------------------
+
+async def _handle_policy(query: str) -> dict[str, Any]:
+    result = await rag.query(query)
+
+    return {
+        "answer": result.get(
+            "answer",
+            "I couldn't find a relevant store policy."
+        ),
+        "sources": result.get("sources", []),
+        "confidence": result.get("confidence", 0.0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# RETURN
+# ---------------------------------------------------------------------------
+
+async def _handle_return(query: str) -> dict[str, Any]:
+    order_id = _extract_order_id(query)
+    product_id = _extract_product_id(query)
+
+    missing: list[str] = []
+
+    if not order_id:
+        missing.append("order_id")
+
+    if not product_id:
+        missing.append("product_id")
+
+    if missing:
+        return {
+            "answer": (
+                "I can help you with the return. "
+                "I need your order ID and product ID first."
+            ),
+            "action_required": True,
+            "missing_information": missing,
+            "confidence": 0.8,
+        }
+
+    eligibility = await backend.check_return(
+        order_id,
+        product_id,
+    )
+
+    if not eligibility:
+        return {
+            "answer": (
+                "I couldn't verify the return eligibility right now."
+            ),
+            "action_required": True,
+            "confidence": 0.4,
+        }
+
+    eligible = eligibility.get(
+        "eligible",
+        eligibility.get("is_eligible", False)
+    )
+
+    if not eligible:
+        return {
+            "answer": eligibility.get(
+                "message",
+                "This item is not eligible for return."
+            ),
+            "action_required": False,
+            "confidence": 0.9,
+        }
+
+    result = await backend.initiate_return(
+        order_id,
+        product_id,
+    )
+
+    if not result:
+        return {
+            "answer": (
+                "The return is eligible, but I couldn't create "
+                "the return request right now."
+            ),
+            "action_required": True,
+            "confidence": 0.7,
+        }
+
+    ticket_id = (
+        result.get("ticket_id")
+        or result.get("return_id")
+        or result.get("id")
+    )
+
+    return {
+        "answer": (
+            f"Your return has been initiated successfully."
+            + (f" Your return ticket is {ticket_id}." if ticket_id else "")
+        ),
+        "action_required": False,
+        "action": {
+            "type": "RETURN",
+            "status": "COMPLETED",
+            "ticket_id": ticket_id,
+            "required_information": None,
+            "message": result.get("message"),
+        },
+        "confidence": 0.98,
+    }
+
+
+# ---------------------------------------------------------------------------
+# EXCHANGE
+# ---------------------------------------------------------------------------
+
+async def _handle_exchange(query: str) -> dict[str, Any]:
+    order_id = _extract_order_id(query)
+    product_id = _extract_product_id(query)
+
+    replacement_product_id = _extract_replacement_product_id(query)
+
+    missing: list[str] = []
+
+    if not order_id:
+        missing.append("order_id")
+
+    if not product_id:
+        missing.append("product_id")
+
+    if not replacement_product_id:
+        missing.append("replacement_product_id")
+
+    if missing:
+        return {
+            "answer": (
+                "I can help you with the exchange. "
+                "I need the order ID, current product ID, "
+                "and replacement product ID."
+            ),
+            "action_required": True,
+            "missing_information": missing,
+            "confidence": 0.8,
+        }
+
+    eligibility = await backend.check_exchange(
+        order_id,
+        product_id,
+        replacement_product_id,
+    )
+
+    if not eligibility:
+        return {
+            "answer": (
+                "I couldn't verify the exchange eligibility right now."
+            ),
+            "action_required": True,
+            "confidence": 0.4,
+        }
+
+    eligible = eligibility.get(
+        "eligible",
+        eligibility.get("is_eligible", False)
+    )
+
+    if not eligible:
+        return {
+            "answer": eligibility.get(
+                "message",
+                "This exchange is not currently eligible."
+            ),
+            "action_required": False,
+            "confidence": 0.9,
+        }
+
+    result = await backend.initiate_exchange(
+        order_id,
+        product_id,
+        replacement_product_id,
+    )
+
+    if not result:
+        return {
+            "answer": (
+                "The exchange is eligible, but I couldn't create "
+                "the exchange request right now."
+            ),
+            "action_required": True,
+            "confidence": 0.7,
+        }
+
+    ticket_id = (
+        result.get("ticket_id")
+        or result.get("exchange_id")
+        or result.get("id")
+    )
+
+    return {
+        "answer": (
+            "Your exchange has been initiated successfully."
+            + (
+                f" Your exchange ticket is {ticket_id}."
+                if ticket_id
+                else ""
+            )
+        ),
+        "action_required": False,
+        "action": {
+            "type": "EXCHANGE",
+            "status": "COMPLETED",
+            "ticket_id": ticket_id,
+            "required_information": None,
+            "message": result.get("message"),
+        },
+        "confidence": 0.98,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GENERAL
+# ---------------------------------------------------------------------------
+
+async def _handle_general(query: str) -> dict[str, Any]:
+    result = await rag.query(query)
+
+    return {
+        "answer": result.get(
+            "answer",
+            "How can I help you today?"
+        ),
+        "sources": result.get("sources", []),
+        "products": result.get("products", []),
+        "confidence": result.get("confidence", 0.0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# EXTRACTION HELPERS
+# ---------------------------------------------------------------------------
+
+def _extract_order_id(query: str) -> str | None:
+    match = re.search(
+        r"\b(?:order\s*(?:id|number)?|ord)\s*[:#-]?\s*([A-Za-z0-9_-]+)",
+        query,
+        flags=re.IGNORECASE,
+    )
+
+    return match.group(1) if match else None
+
+
+def _extract_product_id(query: str) -> str | None:
+    match = re.search(
+        r"\b(?:product\s*(?:id|number)?|product)\s*[:#-]?\s*(P\d+)\b",
+        query,
+        flags=re.IGNORECASE,
+    )
+
+    return match.group(1).upper() if match else None
+
+
+def _extract_replacement_product_id(query: str) -> str | None:
+    patterns = [
+        r"\breplacement\s+(?:product\s*)?(?:id|number)?\s*[:#-]?\s*(P\d+)\b",
+        r"\bexchange\s+(?:for|with)\s+(P\d+)\b",
+        r"\bto\s+(P\d+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).upper()
+
+    return None

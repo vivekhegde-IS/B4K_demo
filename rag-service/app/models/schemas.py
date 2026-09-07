@@ -90,6 +90,7 @@ class QueryResponse(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
     session_id: Optional[str] = None
     language: Optional[str] = "en"
+    timing: dict[str, Any] = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):

@@ -6,6 +6,10 @@ All backend communication is via HTTP — never direct DB access.
 from __future__ import annotations
 
 import logging
+import time
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from functools import wraps
 from typing import Any, Optional
 
 import httpx
@@ -18,6 +22,51 @@ logger = logging.getLogger(__name__)
 # Shared client (reused across requests)
 # ---------------------------------------------------------------------------
 _client: Optional[httpx.AsyncClient] = None
+_request_timings: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "backend_request_timings",
+    default=None,
+)
+
+
+def reset_request_timings() -> None:
+    """Start collecting backend timings for the current request."""
+
+    _request_timings.set([])
+
+
+def get_request_timings() -> list[dict[str, Any]]:
+    """Return backend timings collected in the current async context."""
+
+    return list(_request_timings.get() or [])
+
+
+def timed_backend_call(name: str):
+    """Measure an async backend client operation without changing its API."""
+
+    def decorator(function):
+        @wraps(function)
+        async def wrapped(*args, **kwargs):
+            started = time.perf_counter()
+            started_at = datetime.now(timezone.utc).isoformat()
+            try:
+                return await function(*args, **kwargs)
+            finally:
+                timings = _request_timings.get()
+                if timings is not None:
+                    finished_at = datetime.now(timezone.utc).isoformat()
+                    timings.append({
+                        "operation": name,
+                        "start": started_at,
+                        "end": finished_at,
+                        "latency_ms": round(
+                            (time.perf_counter() - started) * 1000,
+                            2,
+                        ),
+                    })
+
+        return wrapped
+
+    return decorator
 
 
 def get_client() -> httpx.AsyncClient:
@@ -40,6 +89,7 @@ async def close_client() -> None:
 # ---------------------------------------------------------------------------
 # Product APIs
 # ---------------------------------------------------------------------------
+@timed_backend_call("search_products")
 async def search_products(query: str) -> list[dict[str, Any]]:
     """GET /api/products/search?q=<query>"""
     try:
@@ -61,6 +111,7 @@ async def search_products(query: str) -> list[dict[str, Any]]:
         return []
 
 
+@timed_backend_call("get_inventory")
 async def get_inventory(product_id: str) -> dict[str, Any] | None:
     """GET /api/inventory/{product_id}"""
     try:
@@ -79,6 +130,7 @@ async def get_inventory(product_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # Order APIs
 # ---------------------------------------------------------------------------
+@timed_backend_call("get_order")
 async def get_order(order_id: str) -> dict[str, Any] | None:
     """GET /api/orders/{order_id}"""
     try:
@@ -100,6 +152,7 @@ async def get_order(order_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # Return APIs
 # ---------------------------------------------------------------------------
+@timed_backend_call("check_return")
 async def check_return(order_id: str, product_id: str) -> dict[str, Any] | None:
     """POST /api/returns/check"""
     try:
@@ -118,6 +171,7 @@ async def check_return(order_id: str, product_id: str) -> dict[str, Any] | None:
         return None
 
 
+@timed_backend_call("initiate_return")
 async def initiate_return(order_id: str, product_id: str) -> dict[str, Any] | None:
     """POST /api/returns/initiate"""
     try:
@@ -139,6 +193,7 @@ async def initiate_return(order_id: str, product_id: str) -> dict[str, Any] | No
 # ---------------------------------------------------------------------------
 # Exchange APIs
 # ---------------------------------------------------------------------------
+@timed_backend_call("check_exchange")
 async def check_exchange(
     order_id: str,
     product_id: str,
@@ -165,6 +220,7 @@ async def check_exchange(
         return None
 
 
+@timed_backend_call("initiate_exchange")
 async def initiate_exchange(
     order_id: str,
     product_id: str,
