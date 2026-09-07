@@ -1,5 +1,7 @@
-// Mock Store Inventory Dataset & RAG Responder
-export const MOCK_PRODUCTS = [
+import { generateOpenRouterCompletion } from './openRouterService';
+
+// Base Inventory Dataset
+const INITIAL_PRODUCTS = [
   {
     id: "prod_1",
     name: "Nike Air Zoom Pegasus 40",
@@ -92,6 +94,68 @@ export const MOCK_PRODUCTS = [
   }
 ];
 
+// Persistent Inventory Manager
+export function getInventoryProducts() {
+  const saved = localStorage.getItem('retailmate_inventory_products');
+  if (saved) {
+    try {
+      return JSON.parse(saved);
+    } catch (e) {
+      console.warn("Failed to parse saved inventory", e);
+    }
+  }
+  return INITIAL_PRODUCTS;
+}
+
+export function saveInventoryProducts(products) {
+  localStorage.setItem('retailmate_inventory_products', JSON.stringify(products));
+}
+
+export function addInventoryItem(newItem) {
+  const current = getInventoryProducts();
+  const itemToAdd = {
+    id: newItem.id || `prod_${Date.now()}`,
+    name: newItem.name || "New Retail Item",
+    category: newItem.category || "General",
+    price: Number(newItem.price) || 29.99,
+    stock: Number(newItem.stock) || 10,
+    sizes: newItem.sizes ? newItem.sizes.split(',').map(s => s.trim()) : ["M", "L"],
+    aisle: newItem.aisle || "Aisle 2 - General",
+    section: newItem.section || "Shelf A1",
+    in_stock: (Number(newItem.stock) || 10) > 0,
+    sku: newItem.sku || `SKU-${Math.floor(1000 + Math.random() * 9000)}`,
+    rating: 4.5,
+    image: newItem.image || "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=600&auto=format&fit=crop&q=80",
+    description: newItem.description || "In-store retail item."
+  };
+  const updated = [itemToAdd, ...current];
+  saveInventoryProducts(updated);
+  return updated;
+}
+
+export function deleteInventoryItem(id) {
+  const current = getInventoryProducts();
+  const updated = current.filter(p => p.id !== id);
+  saveInventoryProducts(updated);
+  return updated;
+}
+
+export function updateStockCount(id, delta) {
+  const current = getInventoryProducts();
+  const updated = current.map(p => {
+    if (p.id === id) {
+      const newStock = Math.max(0, p.stock + delta);
+      return { ...p, stock: newStock, in_stock: newStock > 0 };
+    }
+    return p;
+  });
+  saveInventoryProducts(updated);
+  return updated;
+}
+
+export const MOCK_PRODUCTS = getInventoryProducts();
+
+// Dynamic Sample Orders & Flexible Order ID Lookup
 export const MOCK_ORDERS = {
   "ORD001": {
     order_id: "ORD001",
@@ -159,63 +223,124 @@ export const MOCK_ORDERS = {
   }
 };
 
-// Smart Local RAG Query Mock Engine
-export function queryMockRagEngine(queryText) {
+/**
+ * Flexible Order Lookup Helper:
+ * If an Order ID exists, returns it. If custom Order ID is provided, dynamically creates a valid Order object!
+ */
+export function lookupOrMockOrder(orderIdInput) {
+  const cleanId = (orderIdInput || 'ORD001').trim().toUpperCase();
+  if (MOCK_ORDERS[cleanId]) {
+    return MOCK_ORDERS[cleanId];
+  }
+
+  const products = getInventoryProducts();
+  const randomProduct = products[Math.floor(Math.random() * products.length)] || INITIAL_PRODUCTS[0];
+
+  return {
+    order_id: cleanId,
+    user_id: "demo-user",
+    date: new Date().toISOString().split('T')[0],
+    status: "Delivered",
+    eligible_for_return: true,
+    days_left: 25,
+    items: [
+      {
+        product_id: randomProduct.id,
+        name: randomProduct.name,
+        size: randomProduct.sizes ? randomProduct.sizes[0] : "Standard",
+        color: "Default",
+        quantity: 1,
+        price: randomProduct.price,
+        image: randomProduct.image,
+        sku: randomProduct.sku
+      }
+    ],
+    total: randomProduct.price
+  };
+}
+
+// Smart Local RAG Query Engine with OpenRouter AI Integration
+export async function queryMockRagEngine(queryText, language = 'en', conversationHistory = []) {
   const q = queryText.toLowerCase();
-  
-  // Return policy check
+  const currentProducts = getInventoryProducts();
+
+  // Search matching products
+  let matchedProducts = currentProducts.filter(p => {
+    const pName = p.name.toLowerCase();
+    const pCat = p.category.toLowerCase();
+    const pAisle = p.aisle.toLowerCase();
+    const pDesc = p.description.toLowerCase();
+    const pSku = p.sku.toLowerCase();
+
+    return q.split(" ").some(word => word.length > 2 && (
+      pName.includes(word) || 
+      pCat.includes(word) || 
+      pAisle.includes(word) ||
+      pDesc.includes(word) ||
+      pSku.includes(word)
+    ));
+  });
+
+  if (matchedProducts.length === 0) {
+    if (q.includes("shoe") || q.includes("nike") || q.includes("size")) {
+      matchedProducts = currentProducts.filter(p => p.category === "Footwear");
+    } else if (q.includes("headphone") || q.includes("sony") || q.includes("tech")) {
+      matchedProducts = currentProducts.filter(p => p.category === "Electronics");
+    } else if (q.includes("jacket") || q.includes("fleece") || q.includes("apparel")) {
+      matchedProducts = currentProducts.filter(p => p.category === "Apparel");
+    } else {
+      matchedProducts = currentProducts.slice(0, 2);
+    }
+  }
+
+  // Attempt OpenRouter AI Completion for continuity and intelligent answers
+  const openRouterAnswer = await generateOpenRouterCompletion({
+    prompt: queryText,
+    conversationHistory: conversationHistory,
+    language: language,
+    inventoryContext: matchedProducts.map(p => ({
+      name: p.name,
+      category: p.category,
+      price: p.price,
+      stock: p.stock,
+      aisle: p.aisle,
+      section: p.section,
+      sizes: p.sizes,
+      in_stock: p.in_stock
+    }))
+  });
+
+  if (openRouterAnswer) {
+    return {
+      answer: openRouterAnswer,
+      products: matchedProducts,
+      sources: ["RetailMate RAG AI Engine (OpenRouter Gemini)"],
+      aisle: matchedProducts[0]?.aisle
+    };
+  }
+
+  // Fallback responses if offline
   if (q.includes("return") || q.includes("refund") || q.includes("exchange") || q.includes("policy")) {
     return {
-      answer: "Our in-store return policy allows returns & exchanges within 30 days of purchase with original receipt/Order ID. Items must be unworn with tags attached. Electronics require original box and packaging.",
+      answer: language === 'hi'
+        ? "हमारी इन-स्टोर वापसी नीति खरीद की तारीख से 30 दिनों के भीतर रसीद के साथ वापसी या विनिमय की अनुमति देती है।"
+        : language === 'kn'
+        ? "ನಮ್ಮ ರಿಟರ್ನ್ ಪಾಲಿಸಿಯು 30 ದಿನಗಳ ಒಳಗೆ ರಸೀದಿಯೊಂದಿಗೆ ಉಡುಪುಗಳು ಮತ್ತು ವಸ್ತುಗಳನ್ನು ಹಿಂತಿರುಗಿಸಲು ಅನುಮತಿಸುತ್ತದೆ."
+        : "Our in-store return policy allows returns & exchanges within 30 days of purchase with receipt/Order ID. Items must be unworn with tags attached.",
       products: [],
       sources: ["Store Policy Doc - Section 4: Returns & Exchanges"],
       suggested_actions: ["Go to Returns Desk", "Look up Order ORD001"]
     };
   }
 
-  // Aisle location query
-  if (q.includes("where") || q.includes("find") || q.includes("aisle") || q.includes("location")) {
-    let matchedProducts = MOCK_PRODUCTS.filter(p => 
-      q.includes(p.name.toLowerCase()) || 
-      q.includes(p.category.toLowerCase()) || 
-      (q.includes("shoe") && p.category === "Footwear") ||
-      (q.includes("nike") && p.name.includes("Nike")) ||
-      (q.includes("headphone") && p.name.includes("Sony")) ||
-      (q.includes("jacket") && p.category === "Apparel") ||
-      (q.includes("water bottle") && p.category === "Accessories")
-    );
-
-    if (matchedProducts.length === 0) matchedProducts = [MOCK_PRODUCTS[0], MOCK_PRODUCTS[1]];
-
-    return {
-      answer: `You can find ${matchedProducts[0].name} in **${matchedProducts[0].aisle}** (${matchedProducts[0].section}). Follow the cyan ceiling signage towards section ${matchedProducts[0].category}.`,
-      products: matchedProducts,
-      sources: ["In-Store Map Database - Section Aisle Index"],
-      aisle: matchedProducts[0].aisle
-    };
-  }
-
-  // Stock / product availability query
-  let matchedProducts = MOCK_PRODUCTS.filter(p => {
-    const pName = p.name.toLowerCase();
-    const pCat = p.category.toLowerCase();
-    return q.split(" ").some(word => word.length > 3 && (pName.includes(word) || pCat.includes(word)));
-  });
-
-  if (matchedProducts.length === 0) {
-    if (q.includes("shoe") || q.includes("nike") || q.includes("size 9")) {
-      matchedProducts = [MOCK_PRODUCTS[0]];
-    } else if (q.includes("headphone") || q.includes("sony")) {
-      matchedProducts = [MOCK_PRODUCTS[3]];
-    } else {
-      matchedProducts = MOCK_PRODUCTS.slice(0, 2);
-    }
-  }
-
-  const first = matchedProducts[0];
+  const first = matchedProducts[0] || currentProducts[0];
   const stockMsg = first.stock > 0 
-    ? `Yes! We currently have ${first.stock} units of ${first.name} in stock at **${first.aisle}**, ${first.section}.`
-    : `Sorry, ${first.name} is currently out of stock in-store. We can arrange free delivery to your home.`;
+    ? (language === 'hi'
+        ? `हाँ! हमारे पास ${first.aisle} (${first.section}) में ${first.name} की ${first.stock} इकाइयाँ उपलब्ध हैं।`
+        : language === 'kn'
+        ? `ಹೌದು! ನಮ್ಮಲ್ಲಿ ${first.aisle} ನಲ್ಲಿ ${first.name} ನ ${first.stock} ವಸ್ತುಗಳು ಲಭ್ಯವಿವೆ.`
+        : `Yes! We currently have ${first.stock} units of ${first.name} in stock at **${first.aisle}**, ${first.section}.`)
+    : `Sorry, ${first.name} is currently out of stock in-store. We can arrange home delivery.`;
 
   return {
     answer: stockMsg,

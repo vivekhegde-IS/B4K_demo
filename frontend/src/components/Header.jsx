@@ -10,7 +10,8 @@ import {
   Search, 
   Sparkles,
   Bot,
-  Globe
+  Globe,
+  PackagePlus
 } from 'lucide-react';
 import { getApiBaseUrl, isMockModeForced } from '../config/apiConfig';
 import { LANGUAGES, t } from '../services/i18n';
@@ -103,6 +104,18 @@ export default function Header({
           >
             <RotateCcw className="w-4 h-4" />
             <span>{t('navReturns', currentLang)}</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('manage_inventory')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+              activeTab === 'manage_inventory'
+                ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/25'
+                : 'text-slate-400 hover:text-white hover:bg-slate-900'
+            }`}
+          >
+            <PackagePlus className="w-4 h-4 text-emerald-400" />
+            <span>{t('navManageInventory', currentLang)}</span>
           </button>
         </nav>
 

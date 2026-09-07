@@ -14,6 +14,8 @@ import ReturnsPage from './pages/ReturnsPage';
 
 import ChatPage from './pages/ChatPage';
 
+import ManageInventoryPage from './pages/ManageInventoryPage';
+
 import {
   MessageSquare,
   Bot,
@@ -301,6 +303,12 @@ export default function App() {
             currentLang={
               currentLang
             }
+          />
+        )}
+
+        {activeTab === 'manage_inventory' && (
+          <ManageInventoryPage
+            currentLang={currentLang}
           />
         )}
 

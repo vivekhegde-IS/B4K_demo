@@ -9,7 +9,7 @@ import {
   QrCode,
   PackageCheck
 } from 'lucide-react';
-import { MOCK_ORDERS } from '../services/mockData';
+import { MOCK_ORDERS, lookupOrMockOrder } from '../services/mockData';
 import { initiateReturn } from '../services/api';
 import TicketModal from '../components/TicketModal';
 import { formatPrice } from '../config/apiConfig';
@@ -29,12 +29,8 @@ export default function ReturnsPage({ currentLang }) {
     setSearchError(null);
     if (!target) return;
 
-    if (MOCK_ORDERS[target]) {
-      setActiveOrder(MOCK_ORDERS[target]);
-    } else {
-      setActiveOrder(null);
-      setSearchError(`Order '${target}' was not found. Try sample orders: ORD001, ORD002, or ORD003.`);
-    }
+    const dynamicOrder = lookupOrMockOrder(target);
+    setActiveOrder(dynamicOrder);
   };
 
   const handleInitiateProcess = async () => {

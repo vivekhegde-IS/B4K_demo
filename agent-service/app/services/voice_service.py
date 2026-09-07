@@ -15,26 +15,24 @@ class VoiceService:
         self.model_path = APP_DIR / "models" / "kokoro-v1.0.onnx"
         self.voices_path = APP_DIR / "models" / "voices-v1.0.bin"
 
-        if not self.model_path.exists():
-            raise FileNotFoundError(
-                f"Kokoro ONNX model not found at:\n{self.model_path}"
-            )
-
-        if not self.voices_path.exists():
-            raise FileNotFoundError(
-                f"Kokoro voices file not found at:\n{self.voices_path}"
-            )
+        if not self.model_path.exists() or not self.voices_path.exists():
+            print(f"Warning: Kokoro ONNX model or voices file not found at:\n{self.model_path}\nRunning VoiceService in fallback mode.")
+            self.kokoro = None
+            return
 
         print("Loading Kokoro...")
         print(f"Model: {self.model_path}")
         print(f"Voices: {self.voices_path}")
 
-        self.kokoro = Kokoro(
-            str(self.model_path),
-            str(self.voices_path)
-        )
-
-        print("Kokoro loaded successfully!")
+        try:
+            self.kokoro = Kokoro(
+                str(self.model_path),
+                str(self.voices_path)
+            )
+            print("Kokoro loaded successfully!")
+        except Exception as e:
+            print(f"Warning: Failed to load Kokoro ONNX: {e}")
+            self.kokoro = None
 
     def text_to_speech(
         self,

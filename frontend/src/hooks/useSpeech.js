@@ -437,14 +437,21 @@ export function useSpeech(currentLangCode = 'en') {
             ''
           );
 
-          const utterance =
-            new SpeechSynthesisUtterance(cleanText);
-
-          utterance.lang =
-            getSpeechLangCode(langCode);
-
-          utterance.rate = 0.95;
+          const utterance = new SpeechSynthesisUtterance(cleanText);
+          const targetLangCode = getSpeechLangCode(langCode);
+          utterance.lang = targetLangCode;
+          utterance.rate = 0.9;
           utterance.pitch = 1.0;
+
+          // Try finding specific regional voice matching target language (hi-IN, kn-IN, en-IN/US)
+          const availableVoices = window.speechSynthesis.getVoices();
+          const matchedVoice = availableVoices.find(v => 
+            v.lang.toLowerCase().includes(langCode.toLowerCase()) || 
+            v.lang.toLowerCase().includes(targetLangCode.toLowerCase())
+          );
+          if (matchedVoice) {
+            utterance.voice = matchedVoice;
+          }
 
           utterance.onstart = () => {
             setIsSpeaking(true);

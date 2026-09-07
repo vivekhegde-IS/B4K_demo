@@ -42,6 +42,7 @@ export const TRANSLATIONS = {
     navProducts: "Products",
     navReturns: "Returns & Exchange",
     navTimeline: "Timeline",
+    navManageInventory: "Manage Stock",
     demoMode: "Demo Mode",
     fastapiReady: "FastAPI Ready",
     resetKiosk: "Reset Session",
