@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { MapPin, CheckCircle2, AlertTriangle, XCircle, Tag, ArrowRight } from 'lucide-react';
 import { formatPrice } from '../config/apiConfig';
 import { t } from '../services/i18n';
@@ -36,7 +36,14 @@ const CATEGORY_IMAGES = {
 const FALLBACK_SVG = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='600' height='400' viewBox='0 0 600 400'><rect width='100%' height='100%' fill='%230f172a'/><path d='M200 250 C240 210, 360 210, 400 250 L420 280 L180 280 Z' fill='%230284c7' opacity='0.8'/><circle cx='300' cy='180' r='45' fill='%2338bdf8'/><text x='50%' y='85%' font-size='20' font-weight='bold' fill='%2394a3b8' text-anchor='middle' font-family='sans-serif'>In-Store Product</text></svg>";
 
 export default function ProductCard({ product, onLocateAisle, onAskAboutProduct, currentLang }) {
-  const [imgSrc, setImgSrc] = useState(null);
+  const [hasImgError, setHasImgError] = useState(false);
+
+  const pId = product ? (product.product_id || product.id || '').toUpperCase() : '';
+  const pName = product ? product.name : '';
+
+  useEffect(() => {
+    setHasImgError(false);
+  }, [pId, pName]);
 
   if (!product) return null;
 
@@ -48,20 +55,19 @@ export default function ProductCard({ product, onLocateAisle, onAskAboutProduct,
     : 0;
 
   const isAvailable = product.in_stock !== undefined 
-    ? product.in_stock 
+    ? Boolean(product.in_stock) 
     : stockCount > 0;
 
   // Primary Image Resolution
-  const pId = (product.product_id || product.id || '').toUpperCase();
   const catKey = (product.category || '').toLowerCase();
   
-  const initialImage = (product.image && product.image.trim()) 
+  const resolvedImage = (product.image && product.image.trim()) 
     ? product.image 
     : (product.image_url && product.image_url.trim()) 
     ? product.image_url 
     : PRODUCT_IMAGES[pId] || CATEGORY_IMAGES[catKey] || CATEGORY_IMAGES.shoes;
 
-  const currentImage = imgSrc || initialImage;
+  const currentImage = hasImgError ? FALLBACK_SVG : resolvedImage;
 
   // Location resolution
   let aisleText = product.aisle;
@@ -115,8 +121,8 @@ export default function ProductCard({ product, onLocateAisle, onAskAboutProduct,
             alt={product.name}
             referrerPolicy="no-referrer"
             onError={() => {
-              if (currentImage !== FALLBACK_SVG) {
-                setImgSrc(FALLBACK_SVG);
+              if (!hasImgError) {
+                setHasImgError(true);
               }
             }}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 opacity-90 group-hover:opacity-100"
