@@ -21,7 +21,7 @@ export async function queryAssistant(
   if (forceMock) {
     console.log('[RetailMate API] Running in Forced Mock Mode');
     await new Promise((resolve) => setTimeout(resolve, 500));
-    const mockRes = queryMockRagEngine(query);
+    const mockRes = await queryMockRagEngine(query, selectedLanguage);
     return {
       isMock: true,
       data: mockRes,
@@ -77,7 +77,7 @@ export async function queryAssistant(
   // Fallback to local RAG engine if live servers are unreachable
   console.log('[RetailMate API] Live FastAPI server unavailable. Using smart local RAG engine.');
   await new Promise((res) => setTimeout(res, 600));
-  const fallbackRes = queryMockRagEngine(query);
+  const fallbackRes = await queryMockRagEngine(query, selectedLanguage);
   return {
     isMock: true,
     isFallback: true,
