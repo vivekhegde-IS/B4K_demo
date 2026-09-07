@@ -4,6 +4,7 @@ import { queryMockRagEngine, MOCK_ORDERS } from './mockData';
 /**
  * Sends prompt query to FastAPI backend /api/assistant/query
  * Payload: { query: string, user_id: string }
+ * Checks primary URL and alternative RAG port (8001) before using fallback engine.
  */
 export async function queryAssistant(query, userId = "demo-user") {
   const baseUrl = getApiBaseUrl();
@@ -11,7 +12,7 @@ export async function queryAssistant(query, userId = "demo-user") {
 
   if (forceMock) {
     console.log("[RetailMate API] Running in Forced Mock Mode");
-    await new Promise(res => setTimeout(res, 600)); // smooth typing simulation
+    await new Promise(res => setTimeout(res, 500));
     const mockRes = queryMockRagEngine(query);
     return {
       isMock: true,
@@ -19,38 +20,46 @@ export async function queryAssistant(query, userId = "demo-user") {
     };
   }
 
-  try {
-    const response = await fetch(`${baseUrl}/api/assistant/query`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query: query,
-        user_id: userId,
-      }),
-    });
+  // Attempt standard configured URL, then fallback to RAG port 8001
+  const urlsToTry = [
+    baseUrl,
+    baseUrl.includes('8000') ? baseUrl.replace('8000', '8001') : 'http://localhost:8001'
+  ];
 
-    if (!response.ok) {
-      throw new Error(`Server returned status ${response.status}`);
+  for (const targetUrl of urlsToTry) {
+    try {
+      const response = await fetch(`${targetUrl}/api/assistant/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: query,
+          user_id: userId,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return {
+          isMock: false,
+          data: data
+        };
+      }
+    } catch (err) {
+      // Continue to next URL candidate
     }
-
-    const data = await response.json();
-    return {
-      isMock: false,
-      data: data
-    };
-  } catch (error) {
-    console.warn(`[RetailMate API] Backend ${baseUrl} unavailable (${error.message}). Falling back to local RAG engine.`);
-    await new Promise(res => setTimeout(res, 700));
-    const fallbackRes = queryMockRagEngine(query);
-    return {
-      isMock: true,
-      isFallback: true,
-      errorMessage: `Could not reach ${baseUrl}. Active in offline mode.`,
-      data: fallbackRes
-    };
   }
+
+  // If live backend servers are offline, return smooth local RAG fallback
+  console.log(`[RetailMate API] Live FastAPI server unavailable. Using smart local RAG engine.`);
+  await new Promise(res => setTimeout(res, 600));
+  const fallbackRes = queryMockRagEngine(query);
+  return {
+    isMock: true,
+    isFallback: true,
+    data: fallbackRes
+  };
 }
 
 /**
@@ -63,36 +72,45 @@ export async function initiateReturn(orderId, action = "return") {
 
   if (forceMock) {
     console.log("[RetailMate API] Processing return in Forced Mock Mode");
-    await new Promise(res => setTimeout(res, 800));
+    await new Promise(res => setTimeout(res, 600));
     return processMockReturn(orderId, action);
   }
 
-  try {
-    const response = await fetch(`${baseUrl}/api/returns/initiate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        order_id: orderId,
-        action: action,
-      }),
-    });
+  // Attempt standard configured URL, then fallback to Backend port 8002
+  const urlsToTry = [
+    baseUrl,
+    baseUrl.includes('8000') ? baseUrl.replace('8000', '8002') : 'http://localhost:8002'
+  ];
 
-    if (!response.ok) {
-      throw new Error(`Server returned status ${response.status}`);
+  for (const targetUrl of urlsToTry) {
+    try {
+      const response = await fetch(`${targetUrl}/api/returns/initiate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          order_id: orderId,
+          action: action,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return {
+          isMock: false,
+          data: data
+        };
+      }
+    } catch (err) {
+      // Continue to next URL candidate
     }
-
-    const data = await response.json();
-    return {
-      isMock: false,
-      data: data
-    };
-  } catch (error) {
-    console.warn(`[RetailMate API] Backend ${baseUrl} unavailable. Processing return via client engine.`);
-    await new Promise(res => setTimeout(res, 800));
-    return processMockReturn(orderId, action);
   }
+
+  // Fallback to local mock return handler
+  console.log(`[RetailMate API] Live FastAPI return service unavailable. Processing via local engine.`);
+  await new Promise(res => setTimeout(res, 600));
+  return processMockReturn(orderId, action);
 }
 
 // Local mock return helper
@@ -136,7 +154,7 @@ function processMockReturn(orderId, action) {
       status: "APPROVED_READY_FOR_COUNTER",
       message: action === "exchange"
         ? `Exchange authorization #${ticketId} created! Bring your item to Aisle 3 counter to swap sizes.`
-        : `Return ticket #${ticketId} generated! Instant refund of $${order.total.toFixed(2)} will be credited to original payment method upon barcode drop-off.`,
+        : `Return ticket #${ticketId} generated! Instant refund will be credited to original payment method upon barcode drop-off.`,
       product_name: item.name,
       amount: order.total,
       created_at: new Date().toISOString()
